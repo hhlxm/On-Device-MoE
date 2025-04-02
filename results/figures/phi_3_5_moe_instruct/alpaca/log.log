@@ -1,0 +1,24 @@
+2025-04-02 00:14:12,796 - INFO - Running with config: analysis:
+  layer_end: 32
+  layer_start: 0
+  token_end: 10000
+  token_start: 1
+dataset:
+  name: alpaca
+  sample_size: 100
+generation:
+  max_new_tokens: 200
+matrix:
+  num_experts: 16
+  num_layers: 32
+model:
+  device: cuda
+  name: /home/pairshoe/lxm/models/Phi_3_5_MoE_instruct
+  type: PhiMoE
+output:
+  dir: /home/pairshoe/lxm/results_temp/figures
+
+2025-04-02 00:39:58,678 - INFO - Saved Expert Activation Heatmap to /home/pairshoe/lxm/results_temp/figures/phi_3_5_moe_instruct/alpaca/Request_level
+2025-04-02 00:39:59,469 - INFO - Saved Cache Hit Rate to /home/pairshoe/lxm/results_temp/figures/phi_3_5_moe_instruct/alpaca/Cache_hit
+2025-04-02 00:40:02,551 - INFO - Saved Cosine Similarity plot to /home/pairshoe/lxm/results_temp/figures/phi_3_5_moe_instruct/alpaca/Token_level
+2025-04-02 01:04:20,003 - INFO - Saved activation matrix to /home/pairshoe/lxm/results_temp/figures/phi_3_5_moe_instruct/alpaca/Sequence_level

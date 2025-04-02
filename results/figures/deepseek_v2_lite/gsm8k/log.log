@@ -1,0 +1,24 @@
+2025-04-02 01:18:41,957 - INFO - Running with config: analysis:
+  layer_end: 27
+  layer_start: 1
+  token_end: 10000
+  token_start: 1
+dataset:
+  name: gsm8k
+  sample_size: 100
+generation:
+  max_new_tokens: 200
+matrix:
+  num_experts: 64
+  num_layers: 26
+model:
+  device: cuda
+  name: /home/pairshoe/lxm/models/DeepSeek_V2_Lite
+  type: DeepseekV2
+output:
+  dir: /home/pairshoe/lxm/results_temp/figures
+
+2025-04-02 01:44:10,184 - INFO - Saved Expert Activation Heatmap to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/gsm8k/Request_level
+2025-04-02 01:44:11,231 - INFO - Saved Cache Hit Rate to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/gsm8k/Cache_hit
+2025-04-02 01:44:14,532 - INFO - Saved Cosine Similarity plot to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/gsm8k/Token_level
+2025-04-02 02:09:09,780 - INFO - Saved activation matrix to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/gsm8k/Sequence_level

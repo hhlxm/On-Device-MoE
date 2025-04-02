@@ -1,0 +1,24 @@
+model:
+  name: "/mnt/hwfile/trustai/share/models/mistralai/Mixtral-8x7B-Instruct-v0.1"
+  type: "Mixtral"
+  device: "cuda"
+
+dataset:
+  name: "alpaca"
+  sample_size: 100
+
+generation:
+  max_new_tokens: 200
+
+output:
+  dir: "/mnt/petrelfs/liuxinmin/moe/results_temp/figures"
+
+analysis:
+  layer_start: 0
+  layer_end: 32
+  token_start: 1
+  token_end: 10000
+
+matrix:
+  num_layers: 32
+  num_experts: 8

@@ -1,0 +1,24 @@
+2025-04-02 03:04:07,595 - INFO - Running with config: analysis:
+  layer_end: 32
+  layer_start: 0
+  token_end: 10000
+  token_start: 1
+dataset:
+  name: swag
+  sample_size: 100
+generation:
+  max_new_tokens: 200
+matrix:
+  num_experts: 8
+  num_layers: 32
+model:
+  device: cuda
+  name: /mnt/hwfile/trustai/share/models/mistralai/Mixtral-8x7B-Instruct-v0.1
+  type: Mixtral
+output:
+  dir: /mnt/petrelfs/liuxinmin/moe/results_temp/figures
+
+2025-04-02 03:36:55,789 - INFO - Saved Expert Activation Heatmap to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/swag/Request_level
+2025-04-02 03:36:56,786 - INFO - Saved Cache Hit Rate to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/swag/Cache_hit
+2025-04-02 03:37:02,346 - INFO - Saved Cosine Similarity plot to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/swag/Token_level
+2025-04-02 04:09:36,818 - INFO - Saved activation matrix to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/swag/Sequence_level

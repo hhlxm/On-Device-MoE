@@ -1,0 +1,24 @@
+2025-04-02 09:05:07,572 - INFO - Running with config: analysis:
+  layer_end: 24
+  layer_start: 0
+  token_end: 10000
+  token_start: 1
+dataset:
+  name: swag
+  sample_size: 100
+generation:
+  max_new_tokens: 200
+matrix:
+  num_experts: 60
+  num_layers: 24
+model:
+  device: cuda
+  name: /home/pairshoe/lxm/models/Qwen1_5_MoE_A2_7B
+  type: Qwen2Moe
+output:
+  dir: /home/pairshoe/lxm/results_temp/figures
+
+2025-04-02 10:30:58,941 - INFO - Saved Expert Activation Heatmap to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/swag/Request_level
+2025-04-02 10:30:59,934 - INFO - Saved Cache Hit Rate to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/swag/Cache_hit
+2025-04-02 10:31:03,945 - INFO - Saved Cosine Similarity plot to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/swag/Token_level
+2025-04-02 12:00:40,774 - INFO - Saved activation matrix to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/swag/Sequence_level

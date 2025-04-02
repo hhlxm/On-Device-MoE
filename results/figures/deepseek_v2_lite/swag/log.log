@@ -1,0 +1,24 @@
+2025-04-02 03:13:14,570 - INFO - Running with config: analysis:
+  layer_end: 27
+  layer_start: 1
+  token_end: 10000
+  token_start: 1
+dataset:
+  name: swag
+  sample_size: 100
+generation:
+  max_new_tokens: 200
+matrix:
+  num_experts: 64
+  num_layers: 26
+model:
+  device: cuda
+  name: /home/pairshoe/lxm/models/DeepSeek_V2_Lite
+  type: DeepseekV2
+output:
+  dir: /home/pairshoe/lxm/results_temp/figures
+
+2025-04-02 03:45:07,874 - INFO - Saved Expert Activation Heatmap to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/swag/Request_level
+2025-04-02 03:45:08,902 - INFO - Saved Cache Hit Rate to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/swag/Cache_hit
+2025-04-02 03:45:12,978 - INFO - Saved Cosine Similarity plot to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/swag/Token_level
+2025-04-02 04:16:35,477 - INFO - Saved activation matrix to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/swag/Sequence_level
