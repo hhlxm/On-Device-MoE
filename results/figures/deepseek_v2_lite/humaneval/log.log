@@ -1,0 +1,24 @@
+2025-04-06 15:56:26,019 - INFO - Running with config: analysis:
+  layer_end: 27
+  layer_start: 1
+  token_end: 10000
+  token_start: 1
+dataset:
+  name: humaneval
+  sample_size: 100
+generation:
+  max_new_tokens: 200
+matrix:
+  num_experts: 64
+  num_layers: 26
+model:
+  device: cuda
+  name: /home/pairshoe/lxm/models/DeepSeek_V2_Lite
+  type: DeepseekV2
+output:
+  dir: /home/pairshoe/lxm/results_temp/figures
+
+2025-04-06 16:26:05,521 - INFO - Saved Expert Activation Heatmap to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/humaneval/Request_level
+2025-04-06 16:26:05,882 - INFO - Saved Layer Top_sum Average to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/humaneval/Sequence_level
+2025-04-06 16:26:06,201 - INFO - Saved Cache Hit Rate to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/humaneval/Cache_hit
+2025-04-06 16:26:09,950 - INFO - Saved Cosine Similarity plot to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/humaneval/Token_level

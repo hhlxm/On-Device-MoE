@@ -1,4 +1,4 @@
-2025-04-02 01:18:41,957 - INFO - Running with config: analysis:
+2025-04-06 15:30:01,510 - INFO - Running with config: analysis:
   layer_end: 27
   layer_start: 1
   token_end: 10000
@@ -18,7 +18,7 @@ model:
 output:
   dir: /home/pairshoe/lxm/results_temp/figures
 
-2025-04-02 01:44:10,184 - INFO - Saved Expert Activation Heatmap to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/gsm8k/Request_level
-2025-04-02 01:44:11,231 - INFO - Saved Cache Hit Rate to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/gsm8k/Cache_hit
-2025-04-02 01:44:14,532 - INFO - Saved Cosine Similarity plot to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/gsm8k/Token_level
-2025-04-02 02:09:09,780 - INFO - Saved activation matrix to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/gsm8k/Sequence_level
+2025-04-06 15:56:15,614 - INFO - Saved Expert Activation Heatmap to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/gsm8k/Request_level
+2025-04-06 15:56:15,924 - INFO - Saved Layer Top_sum Average to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/gsm8k/Sequence_level
+2025-04-06 15:56:16,243 - INFO - Saved Cache Hit Rate to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/gsm8k/Cache_hit
+2025-04-06 15:56:19,586 - INFO - Saved Cosine Similarity plot to /home/pairshoe/lxm/results_temp/figures/deepseek_v2_lite/gsm8k/Token_level

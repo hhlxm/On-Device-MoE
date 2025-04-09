@@ -1,0 +1,48 @@
+2025-04-06 15:17:08,219 - INFO - Running with config: analysis:
+  layer_end: 24
+  layer_start: 0
+  token_end: 10000
+  token_start: 1
+dataset:
+  name: alpaca-zh
+  sample_size: 100
+generation:
+  max_new_tokens: 200
+matrix:
+  num_experts: 60
+  num_layers: 24
+model:
+  device: cuda
+  name: /home/pairshoe/lxm/models/Qwen1_5_MoE_A2_7B
+  type: Qwen2Moe
+output:
+  dir: /home/pairshoe/lxm/results_temp/figures
+
+2025-04-06 16:11:08,233 - INFO - Saved Expert Activation Heatmap to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/alpaca-zh/Request_level
+2025-04-06 16:11:08,538 - INFO - Saved Layer Top_sum Average to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/alpaca-zh/Sequence_level
+2025-04-06 16:11:08,836 - INFO - Saved Cache Hit Rate to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/alpaca-zh/Cache_hit
+2025-04-06 16:11:11,147 - INFO - Saved Cosine Similarity plot to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/alpaca-zh/Token_level
+2025-04-06 20:31:59,082 - INFO - Running with config: analysis:
+  layer_end: 24
+  layer_start: 0
+  token_end: 10000
+  token_start: 1
+dataset:
+  name: alpaca-zh
+  sample_size: 100
+generation:
+  max_new_tokens: 200
+matrix:
+  num_experts: 60
+  num_layers: 24
+model:
+  device: cuda
+  name: /home/pairshoe/lxm/models/Qwen1_5_MoE_A2_7B
+  type: Qwen2Moe
+output:
+  dir: /home/pairshoe/lxm/results_temp/figures
+
+2025-04-06 21:24:04,030 - INFO - Saved Expert Activation Heatmap to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/alpaca-zh/Request_level
+2025-04-06 21:24:04,332 - INFO - Saved Layer Top_sum Average to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/alpaca-zh/Sequence_level
+2025-04-06 21:24:04,635 - INFO - Saved Cache Hit Rate to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/alpaca-zh/Cache_hit
+2025-04-06 21:24:07,023 - INFO - Saved Cosine Similarity plot to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/alpaca-zh/Token_level

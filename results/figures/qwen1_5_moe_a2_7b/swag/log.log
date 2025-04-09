@@ -1,4 +1,4 @@
-2025-04-02 09:05:07,572 - INFO - Running with config: analysis:
+2025-04-06 18:58:54,528 - INFO - Running with config: analysis:
   layer_end: 24
   layer_start: 0
   token_end: 10000
@@ -18,7 +18,7 @@ model:
 output:
   dir: /home/pairshoe/lxm/results_temp/figures
 
-2025-04-02 10:30:58,941 - INFO - Saved Expert Activation Heatmap to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/swag/Request_level
-2025-04-02 10:30:59,934 - INFO - Saved Cache Hit Rate to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/swag/Cache_hit
-2025-04-02 10:31:03,945 - INFO - Saved Cosine Similarity plot to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/swag/Token_level
-2025-04-02 12:00:40,774 - INFO - Saved activation matrix to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/swag/Sequence_level
+2025-04-06 20:27:07,794 - INFO - Saved Expert Activation Heatmap to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/swag/Request_level
+2025-04-06 20:27:08,089 - INFO - Saved Layer Top_sum Average to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/swag/Sequence_level
+2025-04-06 20:27:08,390 - INFO - Saved Cache Hit Rate to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/swag/Cache_hit
+2025-04-06 20:27:11,977 - INFO - Saved Cosine Similarity plot to /home/pairshoe/lxm/results_temp/figures/qwen1_5_moe_a2_7b/swag/Token_level

@@ -1,0 +1,24 @@
+2025-04-06 16:15:10,294 - INFO - Running with config: analysis:
+  layer_end: 32
+  layer_start: 0
+  token_end: 10000
+  token_start: 1
+dataset:
+  name: humaneval
+  sample_size: 100
+generation:
+  max_new_tokens: 200
+matrix:
+  num_experts: 8
+  num_layers: 32
+model:
+  device: cuda
+  name: /mnt/hwfile/trustai/share/models/mistralai/Mixtral-8x7B-Instruct-v0.1
+  type: Mixtral
+output:
+  dir: /mnt/petrelfs/liuxinmin/moe/results_temp/figures
+
+2025-04-06 16:45:18,713 - INFO - Saved Expert Activation Heatmap to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/humaneval/Request_level
+2025-04-06 16:45:19,343 - INFO - Saved Layer Top_sum Average to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/humaneval/Sequence_level
+2025-04-06 16:45:19,959 - INFO - Saved Cache Hit Rate to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/humaneval/Cache_hit
+2025-04-06 16:45:24,813 - INFO - Saved Cosine Similarity plot to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/humaneval/Token_level

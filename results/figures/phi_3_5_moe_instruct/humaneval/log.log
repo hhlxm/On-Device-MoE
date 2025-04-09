@@ -1,0 +1,24 @@
+2025-04-06 15:47:22,166 - INFO - Running with config: analysis:
+  layer_end: 32
+  layer_start: 0
+  token_end: 10000
+  token_start: 1
+dataset:
+  name: humaneval
+  sample_size: 100
+generation:
+  max_new_tokens: 200
+matrix:
+  num_experts: 16
+  num_layers: 32
+model:
+  device: cuda
+  name: /home/pairshoe/lxm/models/Phi_3_5_MoE_instruct
+  type: PhiMoE
+output:
+  dir: /home/pairshoe/lxm/results_temp/figures
+
+2025-04-06 16:17:07,606 - INFO - Saved Expert Activation Heatmap to /home/pairshoe/lxm/results_temp/figures/phi_3_5_moe_instruct/humaneval/Request_level
+2025-04-06 16:17:07,953 - INFO - Saved Layer Top_sum Average to /home/pairshoe/lxm/results_temp/figures/phi_3_5_moe_instruct/humaneval/Sequence_level
+2025-04-06 16:17:08,317 - INFO - Saved Cache Hit Rate to /home/pairshoe/lxm/results_temp/figures/phi_3_5_moe_instruct/humaneval/Cache_hit
+2025-04-06 16:17:11,924 - INFO - Saved Cosine Similarity plot to /home/pairshoe/lxm/results_temp/figures/phi_3_5_moe_instruct/humaneval/Token_level

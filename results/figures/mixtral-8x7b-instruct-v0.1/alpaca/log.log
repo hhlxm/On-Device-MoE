@@ -1,4 +1,4 @@
-2025-04-02 00:38:48,367 - INFO - Running with config: analysis:
+2025-04-06 14:35:27,776 - INFO - Running with config: analysis:
   layer_end: 32
   layer_start: 0
   token_end: 10000
@@ -18,7 +18,7 @@ model:
 output:
   dir: /mnt/petrelfs/liuxinmin/moe/results_temp/figures
 
-2025-04-02 01:09:42,214 - INFO - Saved Expert Activation Heatmap to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/alpaca/Request_level
-2025-04-02 01:09:43,204 - INFO - Saved Cache Hit Rate to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/alpaca/Cache_hit
-2025-04-02 01:09:47,955 - INFO - Saved Cosine Similarity plot to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/alpaca/Token_level
-2025-04-02 01:38:12,429 - INFO - Saved activation matrix to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/alpaca/Sequence_level
+2025-04-06 15:09:34,163 - INFO - Saved Expert Activation Heatmap to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/alpaca/Request_level
+2025-04-06 15:09:34,784 - INFO - Saved Layer Top_sum Average to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/alpaca/Sequence_level
+2025-04-06 15:09:35,423 - INFO - Saved Cache Hit Rate to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/alpaca/Cache_hit
+2025-04-06 15:09:40,807 - INFO - Saved Cosine Similarity plot to /mnt/petrelfs/liuxinmin/moe/results_temp/figures/mixtral-8x7b-instruct-v0.1/alpaca/Token_level
