@@ -75,9 +75,7 @@ logger = logging.get_logger(__name__)
 _CONFIG_FOR_DOC = "PhiMoEConfig"
 
 
-def load_balancing_loss_func(
-    gate_logits: torch.Tensor, num_experts: torch.Tensor = None, top_k=2, attention_mask: Optional[torch.Tensor] = None
-) -> float:
+def load_balancing_loss_func(gate_logits: torch.Tensor, num_experts: torch.Tensor = None, top_k=2, attention_mask: Optional[torch.Tensor] = None) -> float:
     r"""
     Computes auxiliary load balancing loss as in Switch Transformer - implemented in Pytorch.
 
@@ -1083,15 +1081,24 @@ class PhiMoESparseMoeBlock(nn.Module):
         self.total_tokens = 0  # 记录一次推理时的token 数量
         
         
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor,gate_hidden_states=None) -> torch.Tensor:
         """ """
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         if self.training and self.input_jitter_noise > 0:
             hidden_states *= torch.empty_like(hidden_states).uniform_(1.0 - self.input_jitter_noise, 1.0 + self.input_jitter_noise)
+            if gate_hidden_states is not None:
+                gate_hidden_states *= torch.empty_like(gate_hidden_states).uniform_(1.0 - self.input_jitter_noise, 1.0 + self.input_jitter_noise)
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (batch * sequence_length, n_experts)
         # print ( 'moe', self.iter, torch.norm(hidden_states).item())
-        router_logits = self.gate(hidden_states)
+        
+        if gate_hidden_states is not None:
+            gate_input = gate_hidden_states.view(-1, hidden_dim)
+        else:
+            gate_input = hidden_states
+            
+        # gate_input = gate_hidden_states if gate_hidden_states is not None else hidden_states
+        router_logits = self.gate(gate_input)
 
         routing_weights, selected_experts = sparsemixer(
             router_logits, 
@@ -1257,6 +1264,7 @@ class PhiMoEDecoderLayer(nn.Module):
         output_attentions: Optional[bool] = False,
         output_router_logits: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        prev_attn_hidden_states: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         if "padding_mask" in kwargs:
@@ -1297,8 +1305,8 @@ class PhiMoEDecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states, router_logits = self.block_sparse_moe(hidden_states)
+        hidden_states_input = self.post_attention_layernorm(hidden_states)
+        hidden_states, router_logits = self.block_sparse_moe(hidden_states_input, gate_hidden_states=prev_attn_hidden_states)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -1311,6 +1319,8 @@ class PhiMoEDecoderLayer(nn.Module):
 
         if output_router_logits:
             outputs += (router_logits,)
+            
+        outputs += (hidden_states_input,)
 
         return outputs
 
@@ -1455,6 +1465,8 @@ class PhiMoEModel(PhiMoEPreTrainedModel):
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
+        self.pre_dis = 0
+        self.pre_ahead = 1
     # block_sparse_moe
 
     def get_all_expert_frequencies(self):
@@ -1651,7 +1663,11 @@ class PhiMoEModel(PhiMoEPreTrainedModel):
         all_router_logits = () if output_router_logits else None
         next_decoder_cache = None
 
-        for decoder_layer in self.layers:
+        # pre_hidden = None  # 收集每一层的预测器输出
+        pre_hidden = []  # 收集每一层的预测器输出
+
+        # 逐层处理
+        for i, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -1675,6 +1691,7 @@ class PhiMoEModel(PhiMoEPreTrainedModel):
                     output_attentions=output_attentions,
                     output_router_logits=output_router_logits,
                     use_cache=use_cache,
+                    prev_attn_hidden_states=pre_hidden[i-self.pre_ahead] if i >= self.pre_ahead else None,
                 )
 
             hidden_states = layer_outputs[0]
@@ -1685,8 +1702,17 @@ class PhiMoEModel(PhiMoEPreTrainedModel):
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
-            if output_router_logits:
-                all_router_logits += (layer_outputs[-1],)
+            router_logits_idx = 3 if output_attentions and use_cache else (
+                2 if use_cache or output_attentions else 1
+            )
+            if output_router_logits and len(layer_outputs) > router_logits_idx:
+                all_router_logits += (layer_outputs[router_logits_idx],)
+                
+                
+            if i >= self.pre_dis:
+                pre_hidden.append(layer_outputs[-1])
+            else:
+                pre_hidden.append(None)
 
         hidden_states = self.norm(hidden_states)
 

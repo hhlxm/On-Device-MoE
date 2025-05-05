@@ -586,11 +586,20 @@ class DeepseekV2MoE(nn.Module):
         self.total_tokens = 0  # 记录一次推理时的token 数量
         
         
+        #pre
+        self.last_topk_idx = None
+        
+        
     def forward(self, hidden_states):
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         identity = hidden_states
         orig_shape = hidden_states.shape
         topk_idx, topk_weight, aux_loss,scores = self.gate(hidden_states)
+        
+        # 保存 topk_idx
+        self.last_topk_idx = topk_idx.detach()
+        
+        
         # print("scores_shape:",scores.shape)
         # print("topk_idx_shape:",topk_idx.shape)
         if(sequence_length==1):#只统计decode阶段
@@ -1349,7 +1358,15 @@ class DeepseekV2DecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
         
-        
+        # 添加预测器（仅对 MoE 层）
+        if isinstance(self.mlp, DeepseekV2MoE):
+            self.predictor = nn.Linear(
+                config.hidden_size, config.n_routed_experts,bias=False,dtype=torch.float32
+            )  # 输出每个专家的 logits
+            # nn.init.xavier_uniform_(self.predictor.weight)
+            nn.init.kaiming_uniform_(self.predictor.weight, a=math.sqrt(5))
+        else:
+            self.predictor = None
 
     def forward(
         self,
@@ -1396,12 +1413,22 @@ class DeepseekV2DecoderLayer(nn.Module):
             **kwargs,
         )
         hidden_states = residual + hidden_states
-
+        
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
+        
+        #pos2
+        predictor_output = None
+        if self.predictor is not None :
+            predictor_output = self.predictor(hidden_states.type(torch.float32))
+            
+            
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
+
+        # 如果是 MoE 层，返回 hidden_states 用于预测
+
 
         outputs = (hidden_states,)
 
@@ -1410,6 +1437,9 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         if use_cache:
             outputs += (present_key_value,)
+            
+        if predictor_output is not None:
+            outputs += (predictor_output,)
 
         return outputs
 
@@ -1436,7 +1466,6 @@ DeepseekV2_START_DOCSTRING = r"""
     DeepseekV2_START_DOCSTRING,
 )
 class DeepseekV2PreTrainedModel(PreTrainedModel):
-    print("init.....")
     config_class = DeepseekV2Config
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
@@ -1541,7 +1570,6 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
 
     def __init__(self, config: DeepseekV2Config):
         super().__init__(config)
-        print("init.....")
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -1561,6 +1589,11 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
+        
+        self.iou_scores = []  # 存储每一层的 IoU
+        self.accuracy_scores = []
+        self.tokens = 0  # 统计总的 token 数量
+
         
     # Request Level
     def get_all_expert_frequencies(self):
@@ -1603,25 +1636,6 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
             moe_block = layer.mlp
             moe_block.reset_top_avg()
             
-    # def get_all_expert_continue(self):
-    #     """获取所有层的专家连续激活次数"""
-    #     all_frequencies = {}
-    #     for layer_idx, layer in enumerate(self.layers):
-    #         if layer_idx==0:
-    #             continue
-    #         moe_block = layer.mlp  # 假设每层有一个 moe_block 属性
-    #         routed_freq = moe_block.get_expert_max_continue()
-    #         all_frequencies[layer_idx] = {"routed": routed_freq}
-    #         # print(f'sum:{moe_block.total_tokens}')
-    #     return all_frequencies
-
-    # def reset_all_expert_continue(self):
-    #     """重置所有层的计数器"""
-    #     for layer_idx, layer in enumerate(self.layers):
-    #         if layer_idx==0:
-    #             continue
-    #         moe_block = layer.mlp
-    #         moe_block.reset_continue_counts()
             
             
     #cache hit rate
@@ -1740,6 +1754,8 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
             position_ids = position_ids.unsqueeze(0)
 
         if inputs_embeds is None:
+            # print(input_ids.is_cuda)
+            # print(self.embed_tokens.is_cuda)
             inputs_embeds = self.embed_tokens(input_ids)
 
         if self._use_flash_attention_2:
@@ -1765,6 +1781,8 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
+        all_topk_idx = []  # 收集每一层的 topk_idx
+        all_predictor_outputs = []  # 收集每一层的预测器输出
 
         for decoder_layer in self.layers:
             if output_hidden_states:
@@ -1797,12 +1815,125 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+                
+            #Todo : 什么意思
+            if isinstance(decoder_layer.mlp, DeepseekV2MoE):
+                all_topk_idx.append(decoder_layer.mlp.last_topk_idx)
+            else:
+                all_topk_idx.append(None)
+                
+            if  len(layer_outputs) > (2 if output_attentions else 1) + (1 if use_cache else 0):
+                all_predictor_outputs.append(layer_outputs[-1])  # 最后一个输出是 predictor_output
+            else:
+                all_predictor_outputs.append(None)
+                
+        # print(f'all_topk_idx shape:{len(all_topk_idx)}')
+        
 
         hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
+
+        # 在训练时计算预测损失 Todo:什么意思
+        predictor_loss = None
+        predict_step =1 
+        if self.training and len(all_topk_idx) > predict_step:#层数大于1
+            predictor_losses = []
+            for i in range(len(self.layers) - predict_step):
+                if all_predictor_outputs[i] is not None and all_topk_idx[i + predict_step] is not None: #前一层有预测，后两层层有真实值
+                    # 预测器输出 logits，形状为 [batch_size, seq_len, n_routed_experts]
+                    pred_logits = all_predictor_outputs[i]
+                    # 真实 top-k 索引，形状为 [batch_size * seq_len, top_k]
+                    true_topk_idx = all_topk_idx[i + predict_step]
+                    batch_size, seq_length = pred_logits.shape[0], pred_logits.shape[1]
+
+                    # 将 true_topk_idx 转换为 one-hot 编码，形状为 [batch_size, seq_len, n_routed_experts]
+                    true_topk_onehot = torch.zeros_like(pred_logits)
+                    for k in range(self.config.num_experts_per_tok):
+                        true_topk_onehot.scatter_(2, true_topk_idx[:, k].view(batch_size, seq_length, 1), 1)
+
+                    # 使用 BCEWithLogitsLoss 计算损失
+                    loss_fct = nn.BCEWithLogitsLoss(reduction='none')
+                    loss = loss_fct(pred_logits.view(-1, self.config.n_routed_experts), 
+                                  true_topk_onehot.view(-1, self.config.n_routed_experts))
+                    mask = attention_mask.view(-1, 1).expand_as(loss)  # [batch_size * seq_len, n_routed_experts]
+                    masked_loss = loss * mask  # 屏蔽 <pad> token 的损失
+                    loss = masked_loss.sum() / mask.sum()  # 平均有效 token 的损失
+                    predictor_losses.append(loss)
+                    
+            if predictor_losses:
+                predictor_loss = sum(predictor_losses) / len(predictor_losses)
+            
+        elif self.training==False:
+            self.iou_scores = []  # 存储每一层的 IoU
+            self.accuracy_scores = []
+            predictor_losses = []
+            
+            for i in range( len(self.layers) - predict_step):
+                if all_predictor_outputs[i] is not None and all_topk_idx[i + predict_step] is not None:  # 前一层有预测，后一层有真实值
+                    # 预测器输出 logits，形状为 [batch_size, seq_len, n_routed_experts]
+                    pred_logits = all_predictor_outputs[i]
+                    # 真实 top-k 索引，形状为 [batch_size * seq_len, top_k]
+                    true_topk_idx = all_topk_idx[i + predict_step]
+                    batch_size, seq_length = pred_logits.shape[0], pred_logits.shape[1]
+
+                    # 将 true_topk_idx 转换为 one-hot 编码，形状为 [batch_size, seq_len, n_routed_experts]
+                    true_topk_onehot = torch.zeros_like(pred_logits)
+                    for k in range(self.config.num_experts_per_tok):
+                        true_topk_onehot.scatter_(2, true_topk_idx[:, k].view(batch_size, seq_length, 1), 1)
+
+                    # 使用 BCEWithLogitsLoss 计算损失
+                    loss_fct = nn.BCEWithLogitsLoss(reduction='none')
+                    loss = loss_fct(pred_logits.view(-1, self.config.n_routed_experts), 
+                                  true_topk_onehot.view(-1, self.config.n_routed_experts))
+
+                    mask = attention_mask.view(-1, 1).expand_as(loss)  # [batch_size * seq_len, n_routed_experts]
+                    masked_loss = loss * mask  # 屏蔽 <pad> token 的损失
+                    loss = masked_loss.sum() / mask.sum()  # 平均有效 token 的损失
+                    predictor_losses.append(loss)
+                    
+                    
+                    # 计算 IoU（训练时也计算，但仅用于记录）
+                    pred_topk = torch.topk(pred_logits, k=self.config.num_experts_per_tok, dim=-1, sorted=True)[1]  # [batch_size, seq_len, top_k]
+
+                    # 计算交集
+                    pred_mask = torch.zeros_like(pred_logits).scatter_(2, pred_topk, 1)  # [batch_size, seq_len, n_routed_experts]
+                    intersection = (pred_mask * true_topk_onehot).sum(dim=-1)  # [batch_size, seq_len]
+
+                    correct = intersection/self.config.num_experts_per_tok
+                    masked_accuracy = (correct * attention_mask).sum() / attention_mask.sum()
+                    
+                    
+                    # 计算并集
+                    union = pred_mask.sum(dim=-1) + true_topk_onehot.sum(dim=-1) - intersection  # [batch_size, seq_len]
+                    iou = intersection / (union + 1e-8)  # 避免除以零，[batch_size, seq_len]
+                    masked_iou = (iou * attention_mask).sum() / attention_mask.sum()  # 只计算有效 token 的 IoU
+                    self.iou_scores.append(masked_iou.item())
+                    
+                    # true_topk = true_topk_idx.view(batch_size, seq_length, self.config.num_experts_per_tok)  # [batch_size, seq_len, top_k]
+                    # num_half_experts = self.config.num_experts_per_tok // 2
+                    # pred_half = pred_topk[:, :, :num_half_experts]
+                    # true_onehot = torch.zeros(batch_size, seq_length, self.config.n_routed_experts, device=pred_topk.device)
+                    # true_onehot.scatter_(2, true_topk, 1)
+                    # correct = torch.ones(batch_size, seq_length, dtype=torch.bool, device=pred_topk.device)
+                    # for k in range(num_half_experts):
+                    #     pred_k = pred_half[:, :, k].unsqueeze(-1)
+                    #     correct &= true_onehot.gather(2, pred_k).squeeze(-1).bool()
+                    # masked_accuracy = (correct.float() * attention_mask).sum() / attention_mask.sum()
+                    # self.accuracy_scores.append(masked_accuracy.item())
+                    # self.tokens = attention_mask.sum().item()
+            
+                    # # 计算准确率（严格匹配：预测的 top-k 与真实的 top-k 完全相同）
+                    # true_topk = true_topk_idx.view(batch_size, seq_length, self.config.num_experts_per_tok)  # [batch_size, seq_len, top_k]
+                    # correct = (pred_topk.sort(dim=-1)[0] == true_topk.sort(dim=-1)[0]).all(dim=-1)  # [batch_size, seq_len]
+                    # masked_accuracy = (correct.float() * attention_mask).sum() / attention_mask.sum()  # 只计算有效 token 的准确率
+                    self.accuracy_scores.append(masked_accuracy.item())
+                    self.tokens = attention_mask.sum().item()  # 统计总的 token 数量
+            
+            predictor_loss = sum(predictor_losses) / len(predictor_losses)
+            # print(f"Average IoU across layers: {avg_iou:.4f}, Predictor Loss: {predictor_loss:.4f}")
 
         next_cache = None
         if use_cache:
@@ -1822,7 +1953,7 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
-        )
+        ),predictor_loss
         
 
 
@@ -1940,7 +2071,7 @@ class DeepseekV2ForCausalLM(DeepseekV2PreTrainedModel):
         )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = self.model(
+        outputs, predictor_loss = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1956,18 +2087,20 @@ class DeepseekV2ForCausalLM(DeepseekV2PreTrainedModel):
         logits = self.lm_head(hidden_states)
         logits = logits.float()
 
-        loss = None
-        if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
+        # loss = None
+        # if labels is not None:
+        #     # Shift so that tokens < n predict n
+        #     shift_logits = logits[..., :-1, :].contiguous()
+        #     shift_labels = labels[..., 1:].contiguous()
+        #     # Flatten the tokens
+        #     loss_fct = CrossEntropyLoss()
+        #     shift_logits = shift_logits.view(-1, self.config.vocab_size)
+        #     shift_labels = shift_labels.view(-1)
+        #     # Enable model parallelism
+        #     shift_labels = shift_labels.to(shift_logits.device)
+        #     loss = loss_fct(shift_logits, shift_labels)
+
+        loss = predictor_loss
 
         if not return_dict:
             output = (logits,) + outputs[1:]

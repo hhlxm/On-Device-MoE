@@ -75,9 +75,7 @@ logger = logging.get_logger(__name__)
 _CONFIG_FOR_DOC = "PhiMoEConfig"
 
 
-def load_balancing_loss_func(
-    gate_logits: torch.Tensor, num_experts: torch.Tensor = None, top_k=2, attention_mask: Optional[torch.Tensor] = None
-) -> float:
+def load_balancing_loss_func(    gate_logits: torch.Tensor, num_experts: torch.Tensor = None, top_k=2, attention_mask: Optional[torch.Tensor] = None) -> float:
     r"""
     Computes auxiliary load balancing loss as in Switch Transformer - implemented in Pytorch.
 
@@ -1082,16 +1080,27 @@ class PhiMoESparseMoeBlock(nn.Module):
         self.token_frequencies = defaultdict(lambda: np.zeros((self.num_experts)))# 记录每个token的激活情况
         self.total_tokens = 0  # 记录一次推理时的token 数量
         
+        #pre
+        self.pre_topk_idx = None
+        #ground truth
+        self.last_topk_idx = None
         
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor,gate_hidden_states=None) -> torch.Tensor:
         """ """
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         if self.training and self.input_jitter_noise > 0:
             hidden_states *= torch.empty_like(hidden_states).uniform_(1.0 - self.input_jitter_noise, 1.0 + self.input_jitter_noise)
+            if gate_hidden_states is not None:
+                gate_hidden_states *= torch.empty_like(gate_hidden_states).uniform_(1.0 - self.input_jitter_noise, 1.0 + self.input_jitter_noise)
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (batch * sequence_length, n_experts)
         # print ( 'moe', self.iter, torch.norm(hidden_states).item())
+        
+        
+        # gate_input = gate_hidden_states if gate_hidden_states is not None else hidden_states
         router_logits = self.gate(hidden_states)
+        
+        # router_logits = self.gate(hidden_states)
 
         routing_weights, selected_experts = sparsemixer(
             router_logits, 
@@ -1099,7 +1108,21 @@ class PhiMoESparseMoeBlock(nn.Module):
             jitter_eps=self.router_jitter_noise, 
             training=self.training,
         )
-
+        self.pre_topk_idx = selected_experts.detach()
+        self.last_topk_idx = selected_experts.detach()
+        
+        if gate_hidden_states is not None:
+            gate_input = gate_hidden_states.view(-1, hidden_dim)
+            router_logits = self.gate(gate_input)
+            routing_weights, selected_experts = sparsemixer(
+                router_logits, 
+                top_k=self.top_k, 
+                jitter_eps=self.router_jitter_noise, 
+                training=self.training,
+            )
+            self.pre_topk_idx = selected_experts.detach()
+        
+        
         if(sequence_length==1):#只统计decode阶段
                     # 统计路由专家激活次数
             for i in range(batch_size * sequence_length):
@@ -1257,6 +1280,7 @@ class PhiMoEDecoderLayer(nn.Module):
         output_attentions: Optional[bool] = False,
         output_router_logits: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        prev_attn_hidden_states: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         if "padding_mask" in kwargs:
@@ -1297,8 +1321,8 @@ class PhiMoEDecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states, router_logits = self.block_sparse_moe(hidden_states)
+        hidden_states_input = self.post_attention_layernorm(hidden_states)
+        hidden_states, router_logits = self.block_sparse_moe(hidden_states_input, gate_hidden_states=prev_attn_hidden_states)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -1311,6 +1335,9 @@ class PhiMoEDecoderLayer(nn.Module):
 
         if output_router_logits:
             outputs += (router_logits,)
+            
+        # outputs += (attn_hidden_states,)
+        outputs += (hidden_states_input,)
 
         return outputs
 
@@ -1455,6 +1482,15 @@ class PhiMoEModel(PhiMoEPreTrainedModel):
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
+        
+        
+        self.iou_scores = []  # 存储每一层的 IoU
+        self.accuracy_scores = []
+        self.tokens = 0  # 统计总的 token 数量
+        self.pre_dis = 0
+        self.pre_ahead = 1
+        
+        
     # block_sparse_moe
 
     def get_all_expert_frequencies(self):
@@ -1650,8 +1686,13 @@ class PhiMoEModel(PhiMoEPreTrainedModel):
         all_self_attns = () if output_attentions else None
         all_router_logits = () if output_router_logits else None
         next_decoder_cache = None
+        all_topk_idx = []  # 收集每一层的 topk_idx
+        all_pre_topk_idx = []  # 收集每一层的 pre_topk_idx
+        # pre_hidden = None  # 收集每一层的预测器输出
+        pre_hidden = []  # 收集每一层的预测器输出
 
-        for decoder_layer in self.layers:
+        # 逐层处理
+        for i, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -1675,6 +1716,7 @@ class PhiMoEModel(PhiMoEPreTrainedModel):
                     output_attentions=output_attentions,
                     output_router_logits=output_router_logits,
                     use_cache=use_cache,
+                    prev_attn_hidden_states=pre_hidden[i-self.pre_ahead] if i >= self.pre_ahead else None,
                 )
 
             hidden_states = layer_outputs[0]
@@ -1685,14 +1727,76 @@ class PhiMoEModel(PhiMoEPreTrainedModel):
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
-            if output_router_logits:
-                all_router_logits += (layer_outputs[-1],)
+            router_logits_idx = 3 if output_attentions and use_cache else (
+                2 if use_cache or output_attentions else 1
+            )
+            if output_router_logits and len(layer_outputs) > router_logits_idx:
+                all_router_logits += (layer_outputs[router_logits_idx],)
+                
+
+            all_topk_idx.append(decoder_layer.block_sparse_moe.last_topk_idx)
+            all_pre_topk_idx.append(decoder_layer.block_sparse_moe.pre_topk_idx)
+
+                
+            if i >= self.pre_dis:
+                pre_hidden.append(layer_outputs[-1] )
+            else:
+                pre_hidden.append(None)
 
         hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
+
+        if not self.training :
+            self.iou_scores = []
+            self.accuracy_scores = []
+            for i in range(0, len(self.layers)):  # 从第1层MoE开始，第一层应该是100%相同
+                if (
+                    all_topk_idx[i] is not None and  # 当前层是 MoE 层，有真实 topk_idx
+                    all_pre_topk_idx[i] is not None  # 有预测的 pre_topk_idx
+                ):
+                    # 真实 top-k 索引（last_topk_idx），形状为 [batch_size * seq_len, top_k]
+                    true_topk_idx = all_topk_idx[i]
+                    # 预测 top-k 索引（pre_topk_idx），形状为 [batch_size * seq_len, top_k]
+                    pred_topk_idx = all_pre_topk_idx[i]
+                    batch_size, seq_length = input_ids.shape[:2] if input_ids is not None else inputs_embeds.shape[:2]
+
+                    # 将 true_topk_idx 和 pred_topk_idx 转换为 one-hot 编码
+                    true_topk_onehot = torch.zeros(
+                        batch_size, seq_length, self.config.num_local_experts, device=true_topk_idx.device
+                    )
+                    pred_topk_onehot = torch.zeros_like(true_topk_onehot)
+                    true_topk_idx = true_topk_idx.view(batch_size, seq_length, self.config.num_experts_per_tok)
+                    pred_topk_idx = pred_topk_idx.view(batch_size, seq_length, self.config.num_experts_per_tok)
+                    true_topk_onehot.scatter_(2, true_topk_idx, 1)
+                    pred_topk_onehot.scatter_(2, pred_topk_idx, 1)
+
+                    # 计算 IoU
+                    intersection = (pred_topk_onehot * true_topk_onehot).sum(dim=-1)  # [batch_size, seq_len]
+                    correct = intersection/self.config.num_experts_per_tok  # [batch_size, seq_len]
+                    masked_accuracy = (correct.to(attention_mask.device) * attention_mask).sum() / attention_mask.sum()
+                    union = pred_topk_onehot.sum(dim=-1) + true_topk_onehot.sum(dim=-1) - intersection
+                    iou = intersection / (union + 1e-8)  # [batch_size, seq_len]
+                    masked_iou = (iou.to(attention_mask.device) * attention_mask).sum() / attention_mask.sum()
+
+                    self.iou_scores.append(masked_iou.item())
+                    
+                    # # 计算准确率（严格匹配：预测的 top-k 与真实的 top-k 完全相同）
+                    # correct = (pred_topk_idx.sort(dim=-1)[0] == true_topk_idx.sort(dim=-1)[0]).all(dim=-1)  # [batch_size, seq_len]
+
+                    # masked_accuracy = (correct.float().to(attention_mask.device) * attention_mask).sum() / attention_mask.sum()
+
+                    self.accuracy_scores.append(masked_accuracy.item())
+                    self.tokens = attention_mask.sum().item()
+            # # 打印平均 IoU 和准确率
+            # if self.iou_scores and self.accuracy_scores:
+            #     avg_iou = sum(self.iou_scores) / len(self.iou_scores)
+            #     avg_accuracy = sum(self.accuracy_scores) / len(self.accuracy_scores)
+            #     print(f"Average IoU across layers: {avg_iou:.4f}, Average Accuracy: {avg_accuracy:.4f}")
+
+
 
         next_cache = None
         if use_cache:

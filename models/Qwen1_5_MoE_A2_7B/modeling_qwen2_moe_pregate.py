@@ -640,15 +640,16 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         self.total_tokens = 0  # 记录一次推理时的token 数量
         
         
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor,gate_hidden_states=None) -> torch.Tensor:
         """ """
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (batch * sequence_length, n_experts)
-        router_logits = self.gate(hidden_states)
+        router_logits = self.gate(hidden_states if gate_hidden_states is None else gate_hidden_states.view(-1, hidden_dim))
 
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)        
         routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1,sorted=True)
+        
         
         
         if(sequence_length==1):#只统计decode阶段
@@ -660,13 +661,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                     expert_idx = selected_experts[i, k].item()
                     self.top_avg[k] += scores[i, expert_idx].item()
                     self.expert_activation_counts[expert_idx] += 1
-                    # self.token_frequencies[self.total_tokens][expert_idx] = topk_weight[i,k].item()
-                    # expert_indices = selected_experts[i].cpu().numpy()  # 转换为 NumPy 数组
-                    # # 创建 one-hot 编码
-                    # one_hot = np.zeros(self.num_experts)
-                    # one_hot[expert_indices] = 1  # 将激活的专家置为 1
-                    # # 记录到 token_frequencies
-                    # self.token_frequencies[self.total_tokens + 1] = one_hot
+
                     
                     
                     if self.continue_cnt[expert_idx]>=1:#被cache
@@ -818,6 +813,7 @@ class Qwen2MoeDecoderLayer(nn.Module):
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+        prev_attn_hidden_states: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
@@ -864,9 +860,9 @@ class Qwen2MoeDecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states_input = self.post_attention_layernorm(hidden_states)
 
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states_input,gate_hidden_states=prev_attn_hidden_states)
         if isinstance(hidden_states, tuple):
             hidden_states, router_logits = hidden_states
         else:
@@ -885,6 +881,7 @@ class Qwen2MoeDecoderLayer(nn.Module):
         if output_router_logits:
             outputs += (router_logits,)
 
+        outputs += (hidden_states_input,)
         return outputs
 
 
@@ -1037,6 +1034,9 @@ class Qwen2MoeModel(Qwen2MoePreTrainedModel):
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
+        
+        self.pre_dis = 0
+        self.pre_ahead = 1
 
     def get_all_expert_frequencies(self):
         """获取所有层的专家激活概率"""
@@ -1072,23 +1072,6 @@ class Qwen2MoeModel(Qwen2MoePreTrainedModel):
             moe_block = layer.mlp
             moe_block.reset_top_avg()
             
-    # def get_all_expert_continue(self):
-    #     """获取所有层的专家连续激活次数"""
-    #     all_frequencies = {}
-    #     for layer_idx, layer in enumerate(self.layers):
-            
-    #         moe_block = layer.mlp  # 假设每层有一个 moe_block 属性
-    #         routed_freq = moe_block.get_expert_max_continue()
-    #         all_frequencies[layer_idx] = {"routed": routed_freq}
-    #         # print(f'sum:{moe_block.total_tokens}')
-    #     return all_frequencies
-
-    # def reset_all_expert_continue(self):
-    #     """重置所有层的计数器"""
-    #     for layer_idx, layer in enumerate(self.layers):
-            
-    #         moe_block = layer.mlp
-    #         moe_block.reset_continue_counts()
             
     def get_all_expert_hit_rate(self):
         """获取所有层的专家连续激活次数"""
@@ -1208,8 +1191,10 @@ class Qwen2MoeModel(Qwen2MoePreTrainedModel):
         all_self_attns = () if output_attentions else None
         all_router_logits = () if output_router_logits else None
         next_decoder_cache = None
+        
+        pre_hidden = []  # 收集每一层的预测器输出
 
-        for decoder_layer in self.layers:
+        for i, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -1237,6 +1222,7 @@ class Qwen2MoeModel(Qwen2MoePreTrainedModel):
                     use_cache=use_cache,
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
+                    prev_attn_hidden_states=pre_hidden[i-self.pre_ahead] if i >= self.pre_ahead else None,
                 )
 
             hidden_states = layer_outputs[0]
@@ -1247,8 +1233,19 @@ class Qwen2MoeModel(Qwen2MoePreTrainedModel):
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
-            if output_router_logits and layer_outputs[-1] is not None:
-                all_router_logits += (layer_outputs[-1],)
+            router_logits_idx = 3 if output_attentions and use_cache else (
+                2 if use_cache or output_attentions else 1
+            )
+            if output_router_logits and len(layer_outputs) > router_logits_idx:
+                all_router_logits += (layer_outputs[router_logits_idx],)
+
+            # if output_router_logits and layer_outputs[-1] is not None:
+            #     all_router_logits += (layer_outputs[-1],)
+
+            if i >= self.pre_dis:
+                pre_hidden.append(layer_outputs[-1])
+            else:
+                pre_hidden.append(None)
 
         hidden_states = self.norm(hidden_states)
 

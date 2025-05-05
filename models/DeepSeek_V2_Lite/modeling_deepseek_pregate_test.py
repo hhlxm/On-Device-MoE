@@ -586,16 +586,43 @@ class DeepseekV2MoE(nn.Module):
         self.total_tokens = 0  # 记录一次推理时的token 数量
         
         
-    def forward(self, hidden_states):
+        #pre
+        self.pre_topk_idx = None
+        #ground truth
+        self.last_topk_idx = None
+        
+        
+    def forward(self, hidden_states,gate_hidden_states=None):
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         identity = hidden_states
         orig_shape = hidden_states.shape
-        topk_idx, topk_weight, aux_loss,scores = self.gate(hidden_states)
+        
+        
+        # topk_idx, topk_weight, aux_loss, scores = self.gate(hidden_states)
+        # self.last_topk_idx = topk_idx.detach()
+        
+        # self.pre_topk_idx = topk_idx.detach()
+        # if gate_hidden_states is not None:
+        #     gate_input = gate_hidden_states 
+        #     self.pre_topk_idx, _, _, _ = self.gate(gate_input)#这里没有把预测当作ground truth去影响当前层
+        
+        topk_idx, topk_weight, aux_loss, scores = self.gate(hidden_states)
+        self.last_topk_idx = topk_idx.detach()#当前输入预测的输出为ground truth
+        self.pre_topk_idx = topk_idx.detach()
+        
+        
+        if gate_hidden_states is not None:
+            gate_input = gate_hidden_states  
+            # p_topk_idx, _, _, _ = self.gate(gate_input)#之前输入预测的输出为prediction
+            topk_idx, topk_weight, aux_loss, scores = self.gate(gate_input)
+            self.pre_topk_idx = topk_idx.detach()
+         
+        
+                
         # print("scores_shape:",scores.shape)
         # print("topk_idx_shape:",topk_idx.shape)
         if(sequence_length==1):#只统计decode阶段
                     # 统计路由专家激活次数
-       
             for i in range(batch_size * sequence_length):
                 self.token_frequencies[self.total_tokens+1] = scores[i].cpu().detach().numpy()
                 for k in range(self.config.num_experts_per_tok):
@@ -754,21 +781,6 @@ class DeepseekV2MoE(nn.Module):
         """重置计数器"""
         self.total_tokens_nor = 0
         self.top_avg = np.zeros((self.config.num_experts_per_tok)) 
-        
-    # def get_expert_max_continue(self):
-    #     routed_max_continue = {}
-    #     # 路由专家的连续激活最大次数
-    #     for expert_idx in range(self.config.n_routed_experts):
-    #         routed_max_continue[expert_idx] = self.expert_activation_counts_max_continue[expert_idx]/self.total_tokens
-    #     # 共享专家的激活概率（总是 1.0，因为每个 token 都会经过共享专家）
-    #     return  routed_max_continue
-    
-    # def reset_continue_counts(self):
-    #     """重置计数器"""
-    #     self.expert_activation_counts_max_continue.clear()
-    #     self.continue_cnt.clear()
-    #     self.total_tokens = 0
-        
         
         
     def get_expert_hit_rate(self):
@@ -1349,8 +1361,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
         
-        
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1359,6 +1369,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        prev_attn_hidden_states: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
@@ -1386,7 +1397,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        attn_hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1395,13 +1406,22 @@ class DeepseekV2DecoderLayer(nn.Module):
             use_cache=use_cache,
             **kwargs,
         )
-        hidden_states = residual + hidden_states
-
+        hidden_states = residual + attn_hidden_states
+        
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states_input = self.post_attention_layernorm(hidden_states)
+        
+       
+            
+        if isinstance(self.mlp, DeepseekV2MoE):
+            hidden_states = self.mlp(hidden_states_input, gate_hidden_states=prev_attn_hidden_states) #Pregate:上一层的pregate输出
+        else:
+            hidden_states = self.mlp(hidden_states_input)
         hidden_states = residual + hidden_states
+
+        # 如果是 MoE 层，返回 hidden_states 用于预测
+
 
         outputs = (hidden_states,)
 
@@ -1410,7 +1430,11 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         if use_cache:
             outputs += (present_key_value,)
-
+            
+        if isinstance(self.mlp, DeepseekV2MoE):
+            # outputs += (attn_hidden_states,)
+            outputs += (hidden_states_input,)
+        
         return outputs
 
 
@@ -1436,7 +1460,6 @@ DeepseekV2_START_DOCSTRING = r"""
     DeepseekV2_START_DOCSTRING,
 )
 class DeepseekV2PreTrainedModel(PreTrainedModel):
-    print("init.....")
     config_class = DeepseekV2Config
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
@@ -1541,7 +1564,6 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
 
     def __init__(self, config: DeepseekV2Config):
         super().__init__(config)
-        print("init.....")
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -1561,6 +1583,12 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
+        
+        self.iou_scores = []  # 存储每一层的 IoU
+        self.accuracy_scores = []
+        self.tokens = 0  # 统计总的 token 数量
+        self.pre_dis = 1
+        self.pre_ahead = 3 # 提前多久预测
         
     # Request Level
     def get_all_expert_frequencies(self):
@@ -1603,25 +1631,6 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
             moe_block = layer.mlp
             moe_block.reset_top_avg()
             
-    # def get_all_expert_continue(self):
-    #     """获取所有层的专家连续激活次数"""
-    #     all_frequencies = {}
-    #     for layer_idx, layer in enumerate(self.layers):
-    #         if layer_idx==0:
-    #             continue
-    #         moe_block = layer.mlp  # 假设每层有一个 moe_block 属性
-    #         routed_freq = moe_block.get_expert_max_continue()
-    #         all_frequencies[layer_idx] = {"routed": routed_freq}
-    #         # print(f'sum:{moe_block.total_tokens}')
-    #     return all_frequencies
-
-    # def reset_all_expert_continue(self):
-    #     """重置所有层的计数器"""
-    #     for layer_idx, layer in enumerate(self.layers):
-    #         if layer_idx==0:
-    #             continue
-    #         moe_block = layer.mlp
-    #         moe_block.reset_continue_counts()
             
             
     #cache hit rate
@@ -1740,6 +1749,8 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
             position_ids = position_ids.unsqueeze(0)
 
         if inputs_embeds is None:
+            # print(input_ids.is_cuda)
+            # print(self.embed_tokens.is_cuda)
             inputs_embeds = self.embed_tokens(input_ids)
 
         if self._use_flash_attention_2:
@@ -1765,10 +1776,18 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
+        all_topk_idx = []  # 收集每一层的 topk_idx
+        all_pre_topk_idx = []  # 收集每一层的 pre_topk_idx
+        # pre_hidden = None  # 收集每一层的预测器输出
+        pre_hidden = []
 
-        for decoder_layer in self.layers:
+
+        # 逐层处理
+        for i, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
+
+            
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
@@ -1788,6 +1807,7 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
+                    prev_attn_hidden_states=pre_hidden[i-self.pre_ahead] if i>self.pre_ahead else None,
                 )
 
             hidden_states = layer_outputs[0]
@@ -1797,12 +1817,74 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+                
+            #Todo : 什么意思
+            if isinstance(decoder_layer.mlp, DeepseekV2MoE):
+                all_topk_idx.append(decoder_layer.mlp.last_topk_idx)
+                all_pre_topk_idx.append(decoder_layer.mlp.pre_topk_idx)
+            else:
+                all_topk_idx.append(None)
+                all_pre_topk_idx.append(None)
+                
+            if  len(layer_outputs) > (2 if output_attentions else 1) + (1 if use_cache else 0) and i >= self.pre_dis :
+                pre_hidden.append(layer_outputs[-1])
+            else:
+                pre_hidden.append(None)
+                
+                
 
         hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
+
+
+            
+        if not self.training :
+            self.iou_scores = []
+            self.accuracy_scores = []
+            for i in range(1, len(self.layers)):  # 从第1层MoE开始，第一层应该是100%相同
+                if (
+                    all_topk_idx[i] is not None and  # 当前层是 MoE 层，有真实 topk_idx
+                    all_pre_topk_idx[i] is not None  # 有预测的 pre_topk_idx
+                ):
+                    # 真实 top-k 索引（last_topk_idx），形状为 [batch_size * seq_len, top_k]
+                    true_topk_idx = all_topk_idx[i]
+                    # 预测 top-k 索引（pre_topk_idx），形状为 [batch_size * seq_len, top_k]
+                    pred_topk_idx = all_pre_topk_idx[i]
+                    batch_size, seq_length = input_ids.shape[:2] if input_ids is not None else inputs_embeds.shape[:2]
+
+                    # 将 true_topk_idx 和 pred_topk_idx 转换为 one-hot 编码
+                    true_topk_onehot = torch.zeros(
+                        batch_size, seq_length, self.config.n_routed_experts, device=true_topk_idx.device
+                    )
+                    pred_topk_onehot = torch.zeros_like(true_topk_onehot)
+                    true_topk_idx = true_topk_idx.view(batch_size, seq_length, self.config.num_experts_per_tok)
+                    pred_topk_idx = pred_topk_idx.view(batch_size, seq_length, self.config.num_experts_per_tok)
+                    true_topk_onehot.scatter_(2, true_topk_idx, 1)
+                    pred_topk_onehot.scatter_(2, pred_topk_idx, 1)
+
+                    # 计算 IoU
+                    intersection = (pred_topk_onehot * true_topk_onehot).sum(dim=-1)  # [batch_size, seq_len]
+                    correct = intersection/self.config.num_experts_per_tok
+                    masked_accuracy = (correct * attention_mask).sum() / attention_mask.sum()
+                    union = pred_topk_onehot.sum(dim=-1) + true_topk_onehot.sum(dim=-1) - intersection
+                    iou = intersection / (union + 1e-8)  # [batch_size, seq_len]
+                    masked_iou = (iou * attention_mask).sum() / attention_mask.sum()
+                    self.iou_scores.append(masked_iou.item())
+
+                    # # 计算准确率（严格匹配：预测的 top-k 与真实的 top-k 完全相同）
+                    # correct = (pred_topk_idx.sort(dim=-1)[0] == true_topk_idx.sort(dim=-1)[0]).all(dim=-1)  # [batch_size, seq_len]
+                    # masked_accuracy = (correct.float() * attention_mask).sum() / attention_mask.sum()
+                    self.accuracy_scores.append(masked_accuracy.item())
+                    self.tokens = attention_mask.sum().item()
+                    
+            # 打印平均 IoU 和准确率
+            if self.iou_scores and self.accuracy_scores:
+                avg_iou = sum(self.iou_scores) / len(self.iou_scores)
+                avg_accuracy = sum(self.accuracy_scores) / len(self.accuracy_scores)
+                print(f"Average IoU across layers: {avg_iou:.4f}, Average Accuracy: {avg_accuracy:.4f}")
 
         next_cache = None
         if use_cache:
@@ -1835,7 +1917,7 @@ class DeepseekV2ForCausalLM(DeepseekV2PreTrainedModel):
         self.model = DeepseekV2Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        print("init.....")
+        print("init pregate model.....")
         # Initialize weights and apply final processing
         self.post_init()
 
