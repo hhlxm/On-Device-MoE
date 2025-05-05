@@ -1,0 +1,36 @@
+# 随机种子
+seed: 2025
+
+
+# 模型配置
+model:
+  name: "/home/fit/renju/WORK/lxm/models/Qwen1_5_MoE_A2_7B"
+  type: "pregate"
+  pre_dis: 0
+  pre_ahead: 3
+# 输出配置
+output:
+  dir: "/home/fit/renju/WORK/lxm/Predict/results/Qwen1_5_MoE_A2_7B/output_pregate_dis3"  # 输出目录
+
+
+# 数据配置
+data:
+  train_dataset_name: "wikitext-2-raw-v1"  # 训练数据集名称
+  test_dataset_name: "gsm8k"               # 测试数据集名称
+  train_type: "train"                     # 训练数据集类型
+  test_type: "test"                 # 测试数据集类型
+  batch_size: 16                           # 批次大小
+  max_length: 256                          # 最大序列长度
+
+# 训练配置
+train:
+  num_epochs: 0          # 训练轮数
+  print_every: 10        # 每多少步打印一次训练损失
+  eval_every: 5          # 每多少步进行一次验证
+  train_max_steps: -1    # -1表示自适应
+  val_max_steps: 10       # 验证最大步数
+  checkpoint_path: "/home/fit/renju/WORK/lxm/Predict/results/Qwen1_5_MoE_A2_7B/output_pretoken_dis3/Qwen1_5_MoE_A2_7B/wikitext-2-raw-v1/squad/checkpoints/checkpoint_epoch_1.pt"  # 检查点路径
+  optimizer:
+    lr: 0.01             # 学习率
+    eps: 0.0001            # Adam 的 epsilon 参数
+
