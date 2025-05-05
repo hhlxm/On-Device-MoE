@@ -1,0 +1,24 @@
+model:
+  name: "/home/fit/renju/WORK/lxm/models/Qwen1_5_MoE_A2_7B"
+  type: "Qwen2Moe"
+  device: "cuda"
+
+dataset:
+  name: "swag"
+  sample_size: 100
+
+generation:
+  max_new_tokens: 200
+
+output:
+  dir: "/home/fit/renju/WORK/lxm/results_temp/figures"
+
+analysis:
+  layer_start: 0
+  layer_end: 24
+  token_start: 1
+  token_end: 10000
+
+matrix:
+  num_layers: 24
+  num_experts: 60
