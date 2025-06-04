@@ -3,13 +3,13 @@
  # @Author: hhlxm 578723542@qq.com
  # @Date: 2025-04-11 13:39:43
  # @LastEditors: hhlxm 578723542@qq.com
- # @LastEditTime: 2025-04-27 12:49:40
+ # @LastEditTime: 2025-05-23 00:05:23
  # @FilePath: /lxm/Predict/scripts/run_deepseek_test.sh
  # @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
 ### 
 
 # 配置目录，存储所有 YAML 文件
-CONFIG_DIR="/home/fit/renju/WORK/lxm/Predict/config/qwen/test"
+CONFIG_DIR="/home/fit/renju/WORK/lxm/Predict/config/qwen/train"
 
 # Python 脚本路径
 PYTHON_SCRIPT="/home/fit/renju/WORK/lxm/Predict/train.py"

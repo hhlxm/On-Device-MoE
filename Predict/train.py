@@ -18,8 +18,13 @@ import torch.nn as nn
 # 添加当前目录到 sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from Analyse.my_dataload import CustomDataset
+
 from util import setup_logging, load_config, set_random_seed, plot_losses, plot_metrics, load_data, load_model_and_tokenizer
+import statistics
+import math
+from huggingface_hub import login
+login("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")
+
 
 
 # 设置模型参数
@@ -30,9 +35,13 @@ def setup_model_parameters(model):
     predictor_params = []
     for layer in model.model.layers:
         if hasattr(layer, 'predictor') and layer.predictor is not None:
-            for param in layer.predictor.parameters():
-                param.requires_grad = True
-            predictor_params.extend(layer.predictor.parameters())
+            for name, param in layer.predictor.named_parameters():
+                # 如果是 lm_head.weight，则不启用梯度
+                if name == "lm_head.weight":
+                    param.requires_grad = False
+                else:
+                    param.requires_grad = True
+                    predictor_params.append(param)
     return predictor_params
 
 def save_model(model, train_config, save_dir):
@@ -58,11 +67,11 @@ def load_checkpoint(model, checkpoint_path, map_location="cuda"):
     
 
 # 训练一个 batch
-def train_step(model, batch, optimizer, scaler):
+def train_step(model, batch, optimizer,scaler):
     input_ids = batch['input_ids'].to("cuda")
     labels = batch['labels'].to("cuda")
     attention_mask = batch['attention_mask'].to("cuda")
-    with autocast():
+    with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
         outputs = model(input_ids=input_ids, labels=labels, attention_mask=attention_mask)
         loss = outputs.loss
     optimizer.zero_grad()
@@ -70,6 +79,38 @@ def train_step(model, batch, optimizer, scaler):
     scaler.step(optimizer)
     scaler.update()
     return loss.item()
+
+    # """
+    # 执行一个训练步骤（全精度训练）
+    
+    # 参数:
+    #     model: 模型
+    #     batch: 当前批次的数据，包含 input_ids, labels, attention_mask
+    #     optimizer: 优化器
+    # """
+    # # 将数据移动到 GPU
+    # input_ids = batch['input_ids'].to("cuda")
+    # labels = batch['labels'].to("cuda")
+    # attention_mask = batch['attention_mask'].to("cuda")
+
+    # # 前向传播
+    # outputs = model(
+    #     input_ids=input_ids,
+    #     labels=labels,
+    #     attention_mask=attention_mask
+    # )
+    # loss = outputs.loss
+
+    # # 反向传播
+    # optimizer.zero_grad()
+    # loss.backward()
+
+    # # 参数更新
+    # optimizer.step()
+
+    # # 返回损失值
+    # return loss.item()
+
 
 # 验证过程
 def validate(model, val_dataloader, max_steps=2):
@@ -99,7 +140,7 @@ def validate(model, val_dataloader, max_steps=2):
 
 # 主训练循环
 def train(model, train_dataloader, val_dataloader, optimizer, train_config, data_config,model_config,save_dir):
-    scaler = GradScaler()
+    scaler = torch.amp.GradScaler()
     train_loss, val_loss, val_iou, val_acc = {}, {}, {}, {}
     global_step = 0
     save_dir = os.path.join(save_dir ,data_config['test_dataset_name'])
@@ -115,21 +156,26 @@ def train(model, train_dataloader, val_dataloader, optimizer, train_config, data
                 
                 
                 os.makedirs(save_dir, exist_ok=True)
-                plot_losses(train_loss, val_loss, os.path.join(save_dir, "loss_plot.svg"))
-                plot_metrics(val_iou, "iou", os.path.join(save_dir, "val_iou_plot.svg"))
-                plot_metrics(val_acc, "accuracy", os.path.join(save_dir, "val_acc_plot.svg"))
-                
+                plot_losses(train_loss, val_loss, os.path.join(save_dir, "loss_plot.png"))
+                plot_losses(
+                    {key: np.mean(values) if values else None for key, values in val_acc.items()}
+                    , {key: np.mean(values) if values else None for key, values in val_iou.items()}, os.path.join(save_dir, "val_acc.png"))
+                plot_metrics(val_iou, "iou", os.path.join(save_dir, "val_iou_plot.png"))
+                plot_metrics(val_acc, "accuracy", os.path.join(save_dir, "val_acc_plot.png"))
+                logging.info(f"Validation acc: {statistics.mean(v_acc):.7f}")
                 model.train()
 
             train_loss[global_step] = train_step(model, batch, optimizer, scaler)
-
+            # scheduler.step()
             if (step + 1) % train_config["print_every"] == 0:
                 # avg_loss = train_loss[global_step]  # 单步损失
                 logging.info(f"Epoch {epoch + 1}/{train_config['num_epochs']}, Step {step + 1}/{len(train_dataloader)}, "
-                             f"Global Step {global_step}, Train Predictor Loss: {train_loss[global_step]:.4f}")
+                             f"Global Step {global_step}, Train Predictor Loss: {train_loss[global_step]:.7f} ")
             global_step += 1
+            # if model_config.get("type","pregate") in ["prefetch","pretoken"] and global_step%100==0:
+            #     save_model(model, train_config,save_dir)
             
-    if model_config.get("type","pregate") in ["prefetch","pretoken"]:
+    if model_config.get("type","pregate") in ["prefetch","pretoken","pregate"]:
         save_model(model, train_config,save_dir)
     logging.info("Training completed!")
     return val_loss
@@ -180,22 +226,28 @@ def main():
     if (not train_config['num_epochs']==0) and (train_config['train_max_steps']==-1):
         train_config['train_max_steps'] = len(train_dataloader) * train_config['num_epochs']
         logging.info(f"train_max_steps set to {train_config['train_max_steps']}")
-        
-        # if model_config.get("type","pregate") in ["pretoken"]:
+        # checkpoint = torch.load("/home/fit/renju/WORK/lxm/Predict/results/DeepSeek_V2_Lite/output_pregate_instruct_finetune_linear/deepseek_v2_lite/alpaca/alpaca/checkpoints/checkpoint_epoch_1.pt", map_location="cuda")
+        # print(checkpoint['model_state_dict'].keys())
+        # model.load_state_dict(checkpoint['model_state_dict'], strict=False) 
+        # model.save_pretrained("/home/fit/renju/WORK/lxm/models/test", safe_serialization=True)
+        # tokenizer.save_pretrained("/home/fit/renju/WORK/lxm/models/test")
+        # return
+        if model_config.get("type","pregate") in ["pretoken","pregate","prefetch"]:
         #     from models.DeepSeek_V2_Lite.modeling_deepseek_pretoken import DeepseekV2MoE
-        #     for layer in model.model.layers:  # 假设 decoder 层位于 model.model.layers 中
-        #         if isinstance(layer.mlp, DeepseekV2MoE):
-        #                 # 获取 MoE 中的 gate 的 weight
-        #                 gate_weight = layer.mlp.gate.weight
-        #                 # 将 predictor 的 weight 替换为 gate 的 weight
-        #                 layer.predictor.weight = nn.Parameter(gate_weight.float())
+            for layer in model.model.layers:  # 假设 decoder 层位于 model.model.layers 中
+                if layer.predictor is not None:
+                    # print("init")
+                    nn.init.kaiming_uniform_(layer.predictor.linear.weight, a=math.sqrt(5))
+                    # nn.init.kaiming_uniform_(layer.predictor.linear[2].weight, a=math.sqrt(5))
+
+                    # layer.predictor.linear.weight = nn.Parameter(layer.mlp.gate.weight.float())
                         
     elif train_config['train_max_steps'] == -1: #only eval
-        if model_config.get("type","pregate") in ["prefetch","pretoken"]:
+        if model_config.get("type","pregate") in ["prefetch","pretoken","pregate"]:
             load_checkpoint(model, train_config['checkpoint_path'])
         v_loss, v_iou, v_acc = validate(model, val_dataloader, max_steps=train_config.get("val_max_steps", 2))
-        plot_metrics(v_iou, "iou", os.path.join(save_dir,data_config['test_dataset_name'],"figures", "val_iou_plot.svg"),save_data=True)
-        plot_metrics(v_acc, "accuracy", os.path.join(save_dir,data_config['test_dataset_name'],"figures", "val_acc_plot.svg"),save_data=True)
+        plot_metrics(v_iou, "iou", os.path.join(save_dir,data_config['test_dataset_name'],"figures", "val_iou_plot.png"),save_data=True)
+        plot_metrics(v_acc, "accuracy", os.path.join(save_dir,data_config['test_dataset_name'],"figures", "val_acc_plot.png"),save_data=True)
         logging.info("Validation completed!")
         return
         
@@ -206,8 +258,21 @@ def main():
     optimizer = torch.optim.Adam(
         predictor_params, 
         lr=train_config['optimizer']['lr'], 
+        eps = train_config['optimizer']['eps'],
     )
-
+    # base_lr = train_config['optimizer']['lr']
+    # total_steps = train_config['train_max_steps']
+    # warmup_steps = train_config.get("warmup_steps", int(0.1 * total_steps))  # 默认10%预热
+    # min_lr = train_config.get("min_lr", 0.0)
+    # def lr_lambda(current_step):
+    #     if current_step < warmup_steps:
+    #         return current_step / max(1, warmup_steps)
+    #     progress = (current_step - warmup_steps) / max(1, total_steps - warmup_steps)
+    #     cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
+    #     return max(min_lr / base_lr, cosine_decay)
+    # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+    # model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
+    
     # 训练
     train(model, train_dataloader, val_dataloader, optimizer, train_config, data_config,model_config,save_dir)
 
