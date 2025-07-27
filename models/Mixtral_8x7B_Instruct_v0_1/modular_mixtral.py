@@ -187,14 +187,23 @@ class MixtralSparseMoeBlock(nn.Module):
         # Jitter parameters
         self.jitter_noise = config.router_jitter_noise
         
+        #Request Level, 记录推理整个数据集每个专家的激活情况
+        #Sequence Level，记录单次推理每个专家的激活情况（整个数据集只有一个request的特殊情况）
         self.expert_activation_counts = defaultdict(int)  # 记录路由专家的激活次数
-        self.expert_activation_counts_max_continue = defaultdict(int) # 记录路由专家被连续激活的最大次数
-        self.continue_cnt = defaultdict(int) # 记录专家当前连续次数
-        self.cache_hit_cnt = defaultdict(int) # 缓存命中率
-        self.total_tokens = 0  # 记录总 token 数量
-        
-        self.token_frequencies = defaultdict(lambda: np.zeros((self.num_experts)))# 记录每个token的激活情况
+        self.total_tokens_nor = 0
+        self.top_avg = np.zeros((self.top_k)) #记录topk的score均值
 
+        
+        #Cache hit rate ，记录当前层在一次推理中的缓存命中率
+        self.continue_cnt = defaultdict(int) # 记录专家当前连续次数
+        # self.expert_activation_counts_max_continue = defaultdict(int) # 记录路由专家被连续激活的最大次数
+        self.cache_hit_cnt = 0 # 缓存命中次数
+        self.cache_request_cnt = 0 # 缓存请求次数
+        
+        
+        #Token Level,记录一次推理中的每个token激活专家的情况
+        self.token_frequencies = defaultdict(lambda: np.zeros((self.num_experts)))# 记录每个token的激活情况
+        self.total_tokens = 0  # 记录一次推理时的token 数量
 
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -207,7 +216,7 @@ class MixtralSparseMoeBlock(nn.Module):
         router_logits = self.gate(hidden_states)
 
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1,sorted=True)
         
         if(sequence_length==1):#只统计decode阶段
                     # 统计路由专家激活次数
@@ -216,22 +225,25 @@ class MixtralSparseMoeBlock(nn.Module):
                 self.token_frequencies[self.total_tokens+1] = scores[i].cpu().detach().numpy()
                 for k in range(self.top_k):
                     expert_idx = selected_experts[i, k].item()
-                    
+                    self.top_avg[k] += scores[i, expert_idx].item()
+
                     self.expert_activation_counts[expert_idx] += 1
                     # self.token_frequencies[self.total_tokens][expert_idx] = topk_weight[i,k].item()
                     
                     
                     if self.continue_cnt[expert_idx]>=1:#被cache
-                        self.cache_hit_cnt[expert_idx]+=1
+                        self.cache_hit_cnt+=1
                     
                     self.continue_cnt[expert_idx] +=1 #连续次数+1
-                    self.expert_activation_counts_max_continue[expert_idx]=max(self.expert_activation_counts_max_continue[expert_idx],self.continue_cnt[expert_idx])
+                    # self.expert_activation_counts_max_continue[expert_idx]=max(self.expert_activation_counts_max_continue[expert_idx],self.continue_cnt[expert_idx])
                     
                 for k in range(self.num_experts):
                     if k not in set(selected_experts[i].tolist()):# 没被激活的
                         self.continue_cnt[k] = 0 #连续中断,offload
                     
+            self.cache_request_cnt += self.top_k # 缓存请求次数
             self.total_tokens += 1
+            self.total_tokens_nor +=1
         
         
         
@@ -282,23 +294,39 @@ class MixtralSparseMoeBlock(nn.Module):
         self.expert_activation_counts.clear()
         self.total_tokens = 0
         
-    def get_expert_max_continue(self):
-        routed_max_continue = {}
-        # 路由专家的连续激活最大次数
-        for expert_idx in range(self.num_experts):
-            routed_max_continue[expert_idx] = self.expert_activation_counts_max_continue[expert_idx]/self.total_tokens
+    def get_layer_top_avg(self):
+        """计算每层的top分数均值"""
+        if self.total_tokens_nor == 0:
+            return  np.zeros((self.num_experts))            
+        for k in range(self.top_k):
+            self.top_avg[k] = self.top_avg[k]/self.total_tokens_nor
+        return self.top_avg
         # 共享专家的激活概率（总是 1.0，因为每个 token 都会经过共享专家）
-        return  routed_max_continue
-    
-    def reset_continue_counts(self):
+        # return  routed_frequencies
+
+    def reset_top_avg(self):
         """重置计数器"""
-        self.expert_activation_counts_max_continue.clear()
-        self.continue_cnt.clear()
+        self.total_tokens_nor = 0
+        self.top_avg = np.zeros((self.top_k))
+        
+    # def get_expert_max_continue(self):
+    #     routed_max_continue = {}
+    #     # 路由专家的连续激活最大次数
+    #     for expert_idx in range(self.num_experts):
+    #         routed_max_continue[expert_idx] = self.expert_activation_counts_max_continue[expert_idx]/self.total_tokens
+    #     # 共享专家的激活概率（总是 1.0，因为每个 token 都会经过共享专家）
+    #     return  routed_max_continue
+    
+    # def reset_continue_counts(self):
+    #     """重置计数器"""
+    #     self.expert_activation_counts_max_continue.clear()
+    #     self.continue_cnt.clear()
         
     def get_expert_hit_rate(self):
         routed_hit_rate = {}
         for expert_idx in range(self.num_experts):
-            routed_hit_rate[expert_idx] = self.cache_hit_cnt[expert_idx]/self.total_tokens
+            # routed_hit_rate[expert_idx] = self.cache_hit_cnt[expert_idx]/self.total_tokens
+            routed_hit_rate[expert_idx] = self.cache_hit_cnt[expert_idx]/self.expert_activation_counts[expert_idx]
         # 共享专家的激活概率（总是 1.0，因为每个 token 都会经过共享专家）
         return  routed_hit_rate
     
@@ -436,27 +464,43 @@ class MixtralModel(MistralModel):
             
             moe_block = layer.block_sparse_moe
             moe_block.reset_counts()
-            
-    def get_all_expert_continue(self):
-        """获取所有层的专家连续激活次数"""
+        
+    def get_all_layer_top_avg(self):
+        """获取所有层的专家激活概率"""
         all_frequencies = {}
         for layer_idx, layer in enumerate(self.layers):
-            
             moe_block = layer.block_sparse_moe  # 假设每层有一个 moe_block 属性
-            routed_freq = moe_block.get_expert_max_continue()
-            all_frequencies[layer_idx] = {"routed": routed_freq}
+            # routed_freq = moe_block.get_layer_top_avg()
+            all_frequencies[layer_idx] =  moe_block.get_layer_top_avg()
             # print(f'sum:{moe_block.total_tokens}')
         return all_frequencies
 
-    def reset_all_expert_continue(self):
+    def reset_all_layer_top_avg(self):
         """重置所有层的计数器"""
         for layer_idx, layer in enumerate(self.layers):
-            
             moe_block = layer.block_sparse_moe
-            moe_block.reset_continue_counts()
+            moe_block.reset_top_avg()
+        
+    # def get_all_expert_continue(self):
+    #     """获取所有层的专家连续激活次数"""
+    #     all_frequencies = {}
+    #     for layer_idx, layer in enumerate(self.layers):
+            
+    #         moe_block = layer.block_sparse_moe  # 假设每层有一个 moe_block 属性
+    #         routed_freq = moe_block.get_expert_max_continue()
+    #         all_frequencies[layer_idx] = {"routed": routed_freq}
+    #         # print(f'sum:{moe_block.total_tokens}')
+    #     return all_frequencies
+
+    # def reset_all_expert_continue(self):
+    #     """重置所有层的计数器"""
+    #     for layer_idx, layer in enumerate(self.layers):
+            
+    #         moe_block = layer.block_sparse_moe
+    #         moe_block.reset_continue_counts()
             
     def get_all_expert_hit_rate(self):
-        """获取所有层的专家连续激活次数"""
+        """获取所有层的缓存命中率的情况"""
         all_frequencies = {}
         for layer_idx, layer in enumerate(self.layers):
             
@@ -629,6 +673,11 @@ class MixtralForCausalLM(MistralForCausalLM):
         return self.model.get_all_expert_frequencies()
     def reset_all_expert_counts(self):
         self.model.reset_all_expert_counts()
+        
+    def get_all_layer_top_avg(self):
+        return self.model.get_all_layer_top_avg()
+    def reset_all_layer_top_avg(self):
+        self.model.reset_all_layer_top_avg()     
         
     def get_all_expert_continue(self):
         return self.model.get_all_expert_continue()

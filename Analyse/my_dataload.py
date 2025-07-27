@@ -139,5 +139,60 @@ class CustomDataset(torch.utils.data.Dataset):
         attention_mask = encoding['attention_mask'].squeeze(0)
         labels[input_ids == self.tokenizer.pad_token_id] = -100  # 忽略 <pad>
         return {'input_ids': input_ids, 'labels': labels, 'attention_mask': attention_mask}
+    
+class instruct_CustomDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset_name, split, tokenizer, max_length=1024):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.dataset = load_dataset("/home/fit/renju/WORK/lxm/datasets/alpaca")['train']
+        self.prompt_column = "instruction"
+        self.input_column = "input"
+        self.response_column = "output"
+        
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, idx):
+        example = self.dataset[idx]
+        # max_source_length = self.max_length // 2
+        # max_target_length = self.max_length // 2
+        max_total = self.max_length - 1  # 为 eos 留出空间
+        max_source_length = max_total // 2
+        max_target_length = max_total - max_source_length
+        
+        query = example[self.prompt_column] + example[self.input_column]
+        answer = example[self.response_column]
+        
+        # 直接使用 query，不构建 prompt
+        a_ids = self.tokenizer.encode(
+            text=query,
+            add_special_tokens=True,
+            truncation=True,
+            max_length=max_source_length
+        )
+        b_ids = self.tokenizer.encode(
+            text=answer,
+            add_special_tokens=False,
+            truncation=True,
+            max_length=max_target_length
+        )
+        
+        context_length = len(a_ids)
+        input_ids = a_ids + b_ids + [self.tokenizer.eos_token_id]
+        labels = [self.tokenizer.pad_token_id] * context_length + b_ids + [self.tokenizer.eos_token_id]
+        
+        pad_len = self.max_length - len(input_ids) 
+        
+        input_ids = input_ids + [self.tokenizer.pad_token_id] * pad_len
+        labels = labels + [self.tokenizer.pad_token_id] * pad_len
+        labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
+        
+        attention_mask = [0]*len(a_ids)+ [1] * len( b_ids + [self.tokenizer.eos_token_id]) + [0] * pad_len
+        
+        return {
+            'input_ids': torch.tensor(input_ids, dtype=torch.long),
+            'labels': torch.tensor(labels, dtype=torch.long),
+            'attention_mask': torch.tensor(attention_mask, dtype=torch.long)
+        }
 
    

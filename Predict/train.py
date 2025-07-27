@@ -22,8 +22,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from util import setup_logging, load_config, set_random_seed, plot_losses, plot_metrics, load_data, load_model_and_tokenizer
 import statistics
 import math
-from huggingface_hub import login
-login("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")
 
 
 
@@ -80,36 +78,6 @@ def train_step(model, batch, optimizer,scaler):
     scaler.update()
     return loss.item()
 
-    # """
-    # 执行一个训练步骤（全精度训练）
-    
-    # 参数:
-    #     model: 模型
-    #     batch: 当前批次的数据，包含 input_ids, labels, attention_mask
-    #     optimizer: 优化器
-    # """
-    # # 将数据移动到 GPU
-    # input_ids = batch['input_ids'].to("cuda")
-    # labels = batch['labels'].to("cuda")
-    # attention_mask = batch['attention_mask'].to("cuda")
-
-    # # 前向传播
-    # outputs = model(
-    #     input_ids=input_ids,
-    #     labels=labels,
-    #     attention_mask=attention_mask
-    # )
-    # loss = outputs.loss
-
-    # # 反向传播
-    # optimizer.zero_grad()
-    # loss.backward()
-
-    # # 参数更新
-    # optimizer.step()
-
-    # # 返回损失值
-    # return loss.item()
 
 
 # 验证过程
@@ -133,9 +101,6 @@ def validate(model, val_dataloader, max_steps=2):
     avg_iou = [sum(step_iou[i] for step_iou in v_iou) / val_step for i in range(len(v_iou[0]))] if v_iou else []
     avg_acc = [sum(v_acc[s][i] * v_tokens[s] for s in range(val_step)) / sum(v_tokens) for i in range(len(v_acc[0]))] if v_acc and v_tokens else []
     return avg_loss, avg_iou, avg_acc
-
-
-
     
 
 # 主训练循环
@@ -226,21 +191,20 @@ def main():
     if (not train_config['num_epochs']==0) and (train_config['train_max_steps']==-1):
         train_config['train_max_steps'] = len(train_dataloader) * train_config['num_epochs']
         logging.info(f"train_max_steps set to {train_config['train_max_steps']}")
-        # checkpoint = torch.load("/home/fit/renju/WORK/lxm/Predict/results/DeepSeek_V2_Lite/output_pregate_instruct_finetune_linear/deepseek_v2_lite/alpaca/alpaca/checkpoints/checkpoint_epoch_1.pt", map_location="cuda")
+
+        ## save new model
+        # checkpoint = torch.load("/home/fit/renju/WORK/lxm/Predict/results/DeepSeek_V2_Lite/output_pregate_instruct_finetune_linear_dis1/deepseek_v2_lite/alpaca/alpaca/checkpoints/checkpoint_epoch_1.pt", map_location="cuda")
         # print(checkpoint['model_state_dict'].keys())
         # model.load_state_dict(checkpoint['model_state_dict'], strict=False) 
         # model.save_pretrained("/home/fit/renju/WORK/lxm/models/test", safe_serialization=True)
         # tokenizer.save_pretrained("/home/fit/renju/WORK/lxm/models/test")
         # return
+
         if model_config.get("type","pregate") in ["pretoken","pregate","prefetch"]:
         #     from models.DeepSeek_V2_Lite.modeling_deepseek_pretoken import DeepseekV2MoE
             for layer in model.model.layers:  # 假设 decoder 层位于 model.model.layers 中
                 if layer.predictor is not None:
-                    # print("init")
                     nn.init.kaiming_uniform_(layer.predictor.linear.weight, a=math.sqrt(5))
-                    # nn.init.kaiming_uniform_(layer.predictor.linear[2].weight, a=math.sqrt(5))
-
-                    # layer.predictor.linear.weight = nn.Parameter(layer.mlp.gate.weight.float())
                         
     elif train_config['train_max_steps'] == -1: #only eval
         if model_config.get("type","pregate") in ["prefetch","pretoken","pregate"]:
@@ -260,18 +224,6 @@ def main():
         lr=train_config['optimizer']['lr'], 
         eps = train_config['optimizer']['eps'],
     )
-    # base_lr = train_config['optimizer']['lr']
-    # total_steps = train_config['train_max_steps']
-    # warmup_steps = train_config.get("warmup_steps", int(0.1 * total_steps))  # 默认10%预热
-    # min_lr = train_config.get("min_lr", 0.0)
-    # def lr_lambda(current_step):
-    #     if current_step < warmup_steps:
-    #         return current_step / max(1, warmup_steps)
-    #     progress = (current_step - warmup_steps) / max(1, total_steps - warmup_steps)
-    #     cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
-    #     return max(min_lr / base_lr, cosine_decay)
-    # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-    # model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
     
     # 训练
     train(model, train_dataloader, val_dataloader, optimizer, train_config, data_config,model_config,save_dir)

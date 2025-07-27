@@ -1,42 +1,75 @@
 #!/bin/bash
 
-# 配置目录，存储所有 YAML 文件
-CONFIG_DIR="/home/fit/renju/WORK/lxm/Analyse/config_phi_temp"
-
-# Python 脚本路径
+MODEL_NAME="/home/fit/renju/WORK/lxm/models/Phi_3_5_MoE_instruct"
+MODEL_TYPE="PhiMoE"
+CACHE_RATIOS=(0.125 0.25 0.5 0.75)
+DATASETS=("alpaca" "alpaca-zh" "humaneval" "gsm8k" "swag" "squad")
+# CACHE_RATIOS=(0.5)
+# DATASETS=("alpaca")
+OUTPUT_DIR="/home/fit/renju/WORK/lxm/Analyse/results_hot/figures"
 PYTHON_SCRIPT="/home/fit/renju/WORK/lxm/Analyse/eval.py"
 
-# 检查配置目录是否存在
-if [ ! -d "$CONFIG_DIR" ]; then
-    echo "Error: Config directory $CONFIG_DIR does not exist."
-    exit 1
-fi
+generate_config() {
+    local dataset=$1
+    local cache_ratio=$2
+    cat << EOF
+model:
+  name: "$MODEL_NAME"
+  type: "$MODEL_TYPE"
+  device: "cuda"
+  cache_ratio: $cache_ratio
 
-# 检查 Python 脚本是否存在
-if [ ! -f "$PYTHON_SCRIPT" ]; then
-    echo "Error: Python script $PYTHON_SCRIPT does not exist."
-    exit 1
-fi
+dataset:
+  name: "$dataset"
+  sample_size: 100
 
+generation:
+  max_new_tokens: 200
 
+output:
+  dir: "$OUTPUT_DIR"
 
-# 遍历 CONFIG_DIR 中的所有 .yaml 文件
-for config_file in "$CONFIG_DIR"/*.yaml; do
-    if [ -f "$config_file" ]; then
-        echo "Running $PYTHON_SCRIPT with config: $config_file"
-        CUDA_VISIBLE_DEVICES=6,7 python "$PYTHON_SCRIPT" "$config_file"
+analysis:
+  layer_start: 0
+  layer_end: 32
+  token_start: 1
+  token_end: 10000
+
+matrix:
+  num_layers: 32
+  num_experts: 16
+EOF
+}
+
+# ==================== 主执行逻辑 ====================
+echo "开始Phi模型实验..."
+
+for dataset in "${DATASETS[@]}"; do
+    for cache_ratio in "${CACHE_RATIOS[@]}"; do
+        echo "运行: $dataset, Cache_Ratio=$cache_ratio"
         
-        # 检查上一个命令的退出状态
-        if [ $? -eq 0 ]; then
-            echo "Successfully completed: $config_file"
-        else
-            echo "Error occurred while running: $config_file"
-        fi
-        echo "----------------------------------------"
-    else
-        echo "No .yaml files found in $CONFIG_DIR"
-        break
-    fi
+        # 生成临时配置文件并运行
+        config_file="./phi_${dataset}_${cache_ratio}.yaml"
+        generate_config "$dataset" "$cache_ratio" > "$config_file"
+        sbatch_script="./sbatch_phi_${dataset}_${cache_ratio}.sh"
+        cat > "$sbatch_script" << EOF
+#!/bin/bash
+#SBATCH -J phi_${dataset}_${cache_ratio}
+#SBATCH -o ./log/phi_${dataset}_${cache_ratio}_%j.out
+#SBATCH -e ./log/%j_stderr_${dataset}
+#SBATCH -N 1
+#SBATCH -p a01
+#SBATCH --no-requeue
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+source /home/fit/renju/WORK/miniconda3/envs/lxm_infer/bin/activate
+conda activate lxm_infer
+python $PYTHON_SCRIPT $config_file
+rm -f $config_file
+EOF
+        sbatch "$sbatch_script"
+        rm -f "$sbatch_script"
+    done
 done
 
-echo "All configurations processed."
+echo "实验完成！"

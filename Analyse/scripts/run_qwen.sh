@@ -1,42 +1,85 @@
 #!/bin/bash
+###
+ # @Author: hhlxm 578723542@qq.com
+ # @Date: 2025-04-11 14:36:20
+ # @LastEditors: hhlxm 578723542@qq.com
+ # @LastEditTime: 2025-07-01 00:07:25
+ # @FilePath: /lxm/Analyse/scripts/run_qwen.sh
+ # @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+### 
 
-# 配置目录，存储所有 YAML 文件
-CONFIG_DIR="/home/fit/renju/WORK/lxm/Analyse/config_qwen_temp"
-
-# Python 脚本路径
+MODEL_NAME="/home/fit/renju/WORK/lxm/models/Qwen1_5_MoE_A2_7B"
+MODEL_TYPE="Qwen2Moe"
+CACHE_RATIOS=(0.125 0.25 0.5 0.75)
+DATASETS=("alpaca" "alpaca-zh" "humaneval" "gsm8k" "swag" "squad")
+PRE_RATIO=1
+# CACHE_RATIOS=(0.125)
+# DATASETS=("alpaca")
+OUTPUT_DIR="/home/fit/renju/WORK/lxm/Analyse/results_hot/figures"
 PYTHON_SCRIPT="/home/fit/renju/WORK/lxm/Analyse/eval.py"
 
-# 检查配置目录是否存在
-if [ ! -d "$CONFIG_DIR" ]; then
-    echo "Error: Config directory $CONFIG_DIR does not exist."
-    exit 1
-fi
+generate_config() {
+    local dataset=$1
+    local cache_ratio=$2
+    cat << EOF
+model:
+  name: "$MODEL_NAME"
+  type: "$MODEL_TYPE"
+  device: "cuda"
+  cache_ratio: $cache_ratio
+  pre_ratio: $PRE_RATIO
 
-# 检查 Python 脚本是否存在
-if [ ! -f "$PYTHON_SCRIPT" ]; then
-    echo "Error: Python script $PYTHON_SCRIPT does not exist."
-    exit 1
-fi
+dataset:
+  name: "$dataset"
+  sample_size: 100
 
+generation:
+  max_new_tokens: 200
 
+output:
+  dir: "$OUTPUT_DIR"
 
-# 遍历 CONFIG_DIR 中的所有 .yaml 文件
-for config_file in "$CONFIG_DIR"/*.yaml; do
-    if [ -f "$config_file" ]; then
-        echo "Running $PYTHON_SCRIPT with config: $config_file"
-        CUDA_VISIBLE_DEVICES=2 python "$PYTHON_SCRIPT" "$config_file"
+analysis:
+  layer_start: 0
+  layer_end: 24
+  token_start: 1
+  token_end: 10000
+
+matrix:
+  num_layers: 24
+  num_experts: 60
+EOF
+}
+
+# ==================== 主执行逻辑 ====================
+echo "开始qwen模型实验..."
+
+for dataset in "${DATASETS[@]}"; do
+    for cache_ratio in "${CACHE_RATIOS[@]}"; do
+        echo "运行: $dataset, Cache_Ratio=$cache_ratio"
         
-        # 检查上一个命令的退出状态
-        if [ $? -eq 0 ]; then
-            echo "Successfully completed: $config_file"
-        else
-            echo "Error occurred while running: $config_file"
-        fi
-        echo "----------------------------------------"
-    else
-        echo "No .yaml files found in $CONFIG_DIR"
-        break
-    fi
+        # 生成临时配置文件并运行
+        config_file="./qwen_${dataset}_${cache_ratio}.yaml"
+        generate_config "$dataset" "$cache_ratio" > "$config_file"
+        sbatch_script="./sbatch_qwen_${dataset}_${cache_ratio}.sh"
+        cat > "$sbatch_script" << EOF
+#!/bin/bash
+#SBATCH -J qwen_${dataset}_${cache_ratio}
+#SBATCH -o ./log/qwen_${dataset}_${cache_ratio}_%j.out
+#SBATCH -e ./log/%j_stderr_${dataset}
+#SBATCH -N 1
+#SBATCH -p a01
+#SBATCH --no-requeue
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+source /home/fit/renju/WORK/miniconda3/envs/lxm_infer/bin/activate
+conda activate lxm_infer
+python $PYTHON_SCRIPT $config_file
+rm -f $config_file
+EOF
+        sbatch "$sbatch_script"
+        rm -f "$sbatch_script"
+    done
 done
 
-echo "All configurations processed."
+echo "实验完成！"

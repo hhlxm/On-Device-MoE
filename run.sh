@@ -3,23 +3,26 @@
  # @Author: hhlxm 578723542@qq.com
  # @Date: 2025-04-16 01:41:13
  # @LastEditors: hhlxm 578723542@qq.com
- # @LastEditTime: 2025-05-04 17:15:56
+ # @LastEditTime: 2025-05-19 19:03:22
  # @FilePath: /lxm/run.sh
  # @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
 ### 
 declare -A dataset_shots
 dataset_shots=(
-    # ["mmlu"]=5
-    # ["gsm8k"]=5
-    ["hellaswag"]=10
+    # ["mmlu_prehistory"]=5
+    ["gsm8k"]=5
+    # ["hellaswag"]=10
     # ["humaneval"]=0
+    # ["wikitext"]=0
 )
 
-pre_dis=0
-pre_ahead=3
+quant_wbit=4
+quant_num=1
+pre_dis=100
+pre_ahead=100
 
 # 模型和检查点路径
-model_path="/home/fit/renju/WORK/lxm/models/Phi_3_5_MoE_instruct"
+model_path="/home/fit/renju/WORK/lxm/models/Mixtral_8x7B_v0_1"
 # 提取模型名
 model_name=$(basename ${model_path})
 checkpoint_base="null"
@@ -40,7 +43,7 @@ for dataset in "${!dataset_shots[@]}"; do
 #SBATCH -J eval_${dataset}_${shot}_ckpt
 #SBATCH -N 1
 #SBATCH -p a01
-#SBATCH -o ./log/${model_name}_%j_stdout_${dataset}_${shot}shot_dis${pre_dis}_ah${pre_ahead}
+#SBATCH -o ./log/${model_name}_%j_stdout_${dataset}_${shot}shot_dis${pre_dis}_ah${pre_ahead}_wbit${quant_wbit}_n${quant_num}
 #SBATCH -e ./log/%j_stderr_${dataset}_${shot}shot
 #SBATCH --no-requeue
 #SBATCH --ntasks-per-node=1
@@ -55,7 +58,9 @@ python lm_evaluation_harness/data_para.py \
     --batch_size "auto:4" \
     --output_file ${output_file}_with_checkpoint.json \
     --pre_dis ${pre_dis} \
-    --pre_ahead ${pre_ahead} 
+    --pre_ahead ${pre_ahead} \
+    --quant_wbit ${quant_wbit} \
+    --quant_num ${quant_num} 
 EOF
 
     # 提交 sbatch 任务（带 checkpoint）

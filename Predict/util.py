@@ -23,7 +23,7 @@ from Analyse.my_dataload import CustomDataset,instruct_CustomDataset
 # 加载模型和分词器
 def load_model_and_tokenizer(model_config):
     type = model_config['type']
-    if type not in ['pregate','pretoken','prefetch']:
+    if type not in ['pregate','pretoken']:
         raise ValueError("Invalid type. Choose from 'pregate', 'finetune', or 'pretoken'.")
     
     config = AutoConfig.from_pretrained(model_config["name"], trust_remote_code=True)
@@ -38,12 +38,12 @@ def load_model_and_tokenizer(model_config):
         from models.Qwen1_5_MoE_A2_7B.modeling_qwen2_moe_pregate_test import Qwen2MoeForCausalLM
         from models.Mixtral_8x7B_v0_1.modeling_mixtral_pregate_test import MixtralForCausalLM
     elif type == 'pretoken':
-        from models.DeepSeek_V2_Lite.modeling_deepseek_pretoken_ori import DeepseekV2ForCausalLM
+        from models.DeepSeek_V2_Lite.modeling_deepseek_pretoken_predictor import DeepseekV2ForCausalLM
         from models.Phi_3_5_MoE_instruct.modeling_phimoe_pretoken import PhiMoEForCausalLM
         from models.Qwen1_5_MoE_A2_7B.modeling_qwen2_moe_pretoken import Qwen2MoeForCausalLM
         from models.Mixtral_8x7B_v0_1.modeling_mixtral_pretoken import MixtralForCausalLM
-    elif type == 'prefetch':
-        from models.DeepSeek_V2_Lite.modeling_deepseek_prefetch import DeepseekV2ForCausalLM
+    # elif type == 'prefetch':
+    #     from models.DeepSeek_V2_Lite.modeling_deepseek_prefetch import DeepseekV2ForCausalLM
         
     
         

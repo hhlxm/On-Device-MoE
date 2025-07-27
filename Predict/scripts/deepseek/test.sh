@@ -1,17 +1,19 @@
 MODEL_NAME="/home/fit/renju/WORK/lxm/models/DeepSeek_V2_Lite"
-MODEL_TYPE="DeepseekV2"
 # CACHE_RATIOS=(0.125 0.25 0.5 0.75)
-DATASETS=("alpaca" "alpaca-zh" "humaneval" "gsm8k" "swag" "squad")
-OUTPUT_DIR="/home/fit/renju/WORK/lxm/Predict/results/DeepSeek_V2_Lite/output_pregate_instruct_finetune_linear"
+# DATASETS=("alpaca" "alpaca-zh" "humaneval" "gsm8k" "swag" "squad")
+DATASETS=("humaneval")
+PRE_DIS=1
+OUTPUT_DIR="/home/fit/renju/WORK/lxm/Predict/results/DeepSeek_V2_Lite/output_pregate_instruct_finetune_linear_dis$PRE_DIS"
 PYTHON_SCRIPT="/home/fit/renju/WORK/lxm/Predict/train.py"
 TYPE="pregate"
-CHECKPOINT_PATH="/home/fit/renju/WORK/lxm/Predict/results/DeepSeek_V2_Lite/output_pregate_instruct_finetune_linear/deepseek_v2_lite/alpaca/alpaca/checkpoints/checkpoint_epoch_1.pt"
-
+CHECKPOINT_PATH="/home/fit/renju/WORK/lxm/Predict/results/DeepSeek_V2_Lite/output_pregate_instruct_finetune_linear_dis$PRE_DIS/deepseek_v2_lite/alpaca/alpaca/checkpoints/checkpoint_epoch_1.pt"
+PRE_DIS=1
 generate_config() {
     local dataset=$1
     local output_dir=$2
     local type=$3
     local checkpoint_path=$4
+    local pre_dis=$5
     cat << EOF
 # 随机种子
 seed: 2025
@@ -20,6 +22,7 @@ seed: 2025
 model:
   name: "/home/fit/renju/WORK/lxm/models/DeepSeek_V2_Lite"
   type: ${type}
+  pre_dis: ${pre_dis}  # 预训练距离
   
 # 输出配置
 output:
@@ -55,7 +58,7 @@ for dataset in "${DATASETS[@]}"; do
           echo "运行: $dataset"
           # 生成临时配置文件并运行
           config_file="./deepseek_${dataset}.yaml"
-          generate_config "$dataset" "$OUTPUT_DIR" "$TYPE" "$CHECKPOINT_PATH"> "$config_file"
+          generate_config "$dataset" "$OUTPUT_DIR" "$TYPE" "$CHECKPOINT_PATH" "$PRE_DIS"> "$config_file"
           sbatch_script="./sbatch_deepseek_${dataset}.sh"
           cat > "$sbatch_script" << EOF
 #!/bin/bash

@@ -112,16 +112,31 @@ class MixtralSparseMoeBlock(nn.Module):
         # Jitter parameters
         self.jitter_noise = config.router_jitter_noise
         
+        #Request Level, 记录推理整个数据集每个专家的激活情况
+        #Sequence Level，记录单次推理每个专家的激活情况（整个数据集只有一个request的特殊情况）
         self.expert_activation_counts = defaultdict(int)  # 记录路由专家的激活次数
-        self.expert_activation_counts_max_continue = defaultdict(int) # 记录路由专家被连续激活的最大次数
-        self.continue_cnt = defaultdict(int) # 记录专家当前连续次数
-        self.cache_hit_cnt = defaultdict(int) # 缓存命中率
-        self.total_tokens = 0  # 记录总 token 数量
+        self.total_tokens_nor = 0
+        self.top_avg = np.zeros((self.top_k)) #记录topk的score均值
+
         
+        #Cache hit rate ，记录当前层在一次推理中的缓存命中率
+        self.continue_cnt = defaultdict(int) # 记录专家当前连续次数
+        # self.expert_activation_counts_max_continue = defaultdict(int) # 记录路由专家被连续激活的最大次数
+        self.cache_hit_cnt = 0 # 缓存命中次数
+        self.cache_request_cnt = 0 # 缓存请求次数
+        
+        
+        #Token Level,记录一次推理中的每个token激活专家的情况
         self.token_frequencies = defaultdict(lambda: np.zeros((self.num_experts)))# 记录每个token的激活情况
+        self.total_tokens = 0  # 记录一次推理时的token 数量
+        
+        #pre
+        self.pre_topk_idx = None
+        #ground truth
+        self.last_topk_idx = None
+        
 
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor,gate_hidden_states=None) -> torch.Tensor:
         """ """
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         if self.training and self.jitter_noise > 0:
@@ -131,7 +146,17 @@ class MixtralSparseMoeBlock(nn.Module):
         router_logits = self.gate(hidden_states)
 
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1,sorted=True)
+        
+        self.pre_topk_idx = selected_experts.detach()
+        self.last_topk_idx = selected_experts.detach()
+        
+        if gate_hidden_states is not None:
+            p_router_logits = self.gate(gate_hidden_states)
+            p_routing_weights = F.softmax(p_router_logits, dim=1, dtype=torch.float)
+            p_routing_weights, p_selected_experts = torch.topk(p_routing_weights, self.top_k, dim=-1,sorted=True)
+            self.pre_topk_idx = p_selected_experts.detach()
+        
         
         if(sequence_length==1):#只统计decode阶段
                     # 统计路由专家激活次数
@@ -140,22 +165,24 @@ class MixtralSparseMoeBlock(nn.Module):
                 self.token_frequencies[self.total_tokens+1] = scores[i].cpu().detach().numpy()
                 for k in range(self.top_k):
                     expert_idx = selected_experts[i, k].item()
-                    
+                    self.top_avg[k] += scores[i, expert_idx].item()
                     self.expert_activation_counts[expert_idx] += 1
                     # self.token_frequencies[self.total_tokens][expert_idx] = topk_weight[i,k].item()
                     
                     
                     if self.continue_cnt[expert_idx]>=1:#被cache
-                        self.cache_hit_cnt[expert_idx]+=1
+                        self.cache_hit_cnt+=1
                     
                     self.continue_cnt[expert_idx] +=1 #连续次数+1
-                    self.expert_activation_counts_max_continue[expert_idx]=max(self.expert_activation_counts_max_continue[expert_idx],self.continue_cnt[expert_idx])
+                    # self.expert_activation_counts_max_continue[expert_idx]=max(self.expert_activation_counts_max_continue[expert_idx],self.continue_cnt[expert_idx])
                     
                 for k in range(self.num_experts):
                     if k not in set(selected_experts[i].tolist()):# 没被激活的
                         self.continue_cnt[k] = 0 #连续中断,offload
                     
+            self.cache_request_cnt += self.top_k # 缓存请求次数
             self.total_tokens += 1
+            self.total_tokens_nor +=1
         
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
         # we cast back to the input dtype
@@ -188,13 +215,13 @@ class MixtralSparseMoeBlock(nn.Module):
     
     def get_expert_frequencies(self):
         """计算每个专家的激活概率"""
-        if self.total_tokens == 0:
+        if self.total_tokens_nor == 0:
             return  {}
         routed_frequencies = {}
         # 路由专家的激活概率
         for expert_idx in range(self.num_experts):
             count = self.expert_activation_counts[expert_idx]
-            frequency = count / (self.total_tokens)  
+            frequency = count / (self.total_tokens_nor)  
             routed_frequencies[expert_idx] = frequency
         # 共享专家的激活概率（总是 1.0，因为每个 token 都会经过共享专家）
         return  routed_frequencies
@@ -202,31 +229,49 @@ class MixtralSparseMoeBlock(nn.Module):
     def reset_counts(self):
         """重置计数器"""
         self.expert_activation_counts.clear()
-        self.total_tokens = 0
+        self.total_tokens_nor = 0
         
-    def get_expert_max_continue(self):
-        routed_max_continue = {}
-        # 路由专家的连续激活最大次数
-        for expert_idx in range(self.num_experts):
-            routed_max_continue[expert_idx] = self.expert_activation_counts_max_continue[expert_idx]/self.total_tokens
+        
+    def get_layer_top_avg(self):
+        """计算每层的top分数均值"""
+        if self.total_tokens_nor == 0:
+            return  np.zeros((self.num_experts))            
+        for k in range(self.top_k):
+            self.top_avg[k] = self.top_avg[k]/self.total_tokens_nor
+        return self.top_avg
         # 共享专家的激活概率（总是 1.0，因为每个 token 都会经过共享专家）
-        return  routed_max_continue
-    
-    def reset_continue_counts(self):
+        # return  routed_frequencies
+
+    def reset_top_avg(self):
         """重置计数器"""
-        self.expert_activation_counts_max_continue.clear()
-        self.continue_cnt.clear()
+        self.total_tokens_nor = 0
+        self.top_avg = np.zeros((self.top_k)) 
+    
+    # def get_expert_max_continue(self):
+    #     routed_max_continue = {}
+    #     # 路由专家的连续激活最大次数
+    #     for expert_idx in range(self.num_experts):
+    #         routed_max_continue[expert_idx] = self.expert_activation_counts_max_continue[expert_idx]/self.total_tokens
+    #     # 共享专家的激活概率（总是 1.0，因为每个 token 都会经过共享专家）
+    #     return  routed_max_continue
+    
+    # def reset_continue_counts(self):
+    #     """重置计数器"""
+    #     self.expert_activation_counts_max_continue.clear()
+    #     self.continue_cnt.clear()
         
     def get_expert_hit_rate(self):
-        routed_hit_rate = {}
-        for expert_idx in range(self.num_experts):
-            routed_hit_rate[expert_idx] = self.cache_hit_cnt[expert_idx]/self.total_tokens
-        # 共享专家的激活概率（总是 1.0，因为每个 token 都会经过共享专家）
-        return  routed_hit_rate
-    
+        # routed_hit_rate = {}
+        # for expert_idx in range(self.config.n_routed_experts):
+        #     # routed_hit_rate[expert_idx] = self.cache_hit_cnt[expert_idx]/self.total_tokens
+        #     routed_hit_rate[expert_idx] = self.cache_hit_cnt[expert_idx]/self.expert_activation_counts[expert_idx]
+        # # 共享专家的激活概率（总是 1.0，因为每个 token 都会经过共享专家）
+        return  self.cache_hit_cnt/self.cache_request_cnt #缓存命中次数/缓存请求次数
     def reset_hit_counts(self):
-        """重置计数器"""
-        self.cache_hit_cnt.clear()
+        """重置缓存命中次数，缓存请求次数，缓存连续队列"""
+        self.cache_hit_cnt=0
+        self.cache_request_cnt = 0
+        self.continue_cnt.clear()
         
     def get_token_frequency(self):
         # 共享专家的激活概率（总是 1.0，因为每个 token 都会经过共享专家）
@@ -235,6 +280,7 @@ class MixtralSparseMoeBlock(nn.Module):
     def reset_token_frequency(self):
         """重置计数器"""
         self.token_frequencies.clear()
+        self.total_tokens = 0
 
 
 class MixtralRMSNorm(nn.Module):
@@ -419,6 +465,7 @@ class MixtralDecoderLayer(nn.Module):
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+        prev_attn_hidden_states: Optional[torch.Tensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
@@ -448,7 +495,7 @@ class MixtralDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states, self_attn_weights = self.self_attn(
+        attn_hidden_states, self_attn_weights = self.self_attn(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             attention_mask=attention_mask,
@@ -459,7 +506,7 @@ class MixtralDecoderLayer(nn.Module):
             cache_position=cache_position,
             **kwargs,
         )
-        hidden_states = residual + hidden_states
+        hidden_states = residual + attn_hidden_states
 
         # Fully Connected
         residual = hidden_states
@@ -474,6 +521,8 @@ class MixtralDecoderLayer(nn.Module):
 
         if output_router_logits:
             outputs += (router_logits,)
+            
+        output+=(residual,)
 
         return outputs
 
@@ -680,6 +729,100 @@ class MixtralModel(MixtralPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+        
+        self.pre_dis=0
+        self.iou_scores = []  # 存储每一层的 IoU
+        self.accuracy_scores = []
+        self.tokens = 0  # 统计总的 token 数量
+
+    def get_all_expert_frequencies(self):
+        """获取所有层的专家激活概率"""
+        all_frequencies = {}
+        for layer_idx, layer in enumerate(self.layers):
+            
+            moe_block = layer.block_sparse_moe  # 假设每层有一个 moe_block 属性
+            routed_freq = moe_block.get_expert_frequencies()
+            all_frequencies[layer_idx] = {"routed": routed_freq}
+            # print(f'sum:{moe_block.total_tokens}')
+        return all_frequencies
+
+    def reset_all_expert_counts(self):
+        """重置所有层的计数器"""
+        for layer_idx, layer in enumerate(self.layers):
+            
+            moe_block = layer.block_sparse_moe
+            moe_block.reset_counts()
+            
+    def get_all_layer_top_avg(self):
+        """获取所有层的专家激活概率"""
+        all_frequencies = {}
+        for layer_idx, layer in enumerate(self.layers):
+            moe_block = layer.block_sparse_moe  # 假设每层有一个 moe_block 属性
+            # routed_freq = moe_block.get_layer_top_avg()
+            all_frequencies[layer_idx] =  moe_block.get_layer_top_avg()
+            # print(f'sum:{moe_block.total_tokens}')
+        return all_frequencies
+
+    def reset_all_layer_top_avg(self):
+        """重置所有层的计数器"""
+        for layer_idx, layer in enumerate(self.layers):
+            moe_block = layer.block_sparse_moe
+            moe_block.reset_top_avg()
+            
+            
+    # def get_all_expert_continue(self):
+    #     """获取所有层的专家连续激活次数"""
+    #     all_frequencies = {}
+    #     for layer_idx, layer in enumerate(self.layers):
+            
+    #         moe_block = layer.block_sparse_moe  # 假设每层有一个 moe_block 属性
+    #         routed_freq = moe_block.get_expert_max_continue()
+    #         all_frequencies[layer_idx] = {"routed": routed_freq}
+    #         # print(f'sum:{moe_block.total_tokens}')
+    #     return all_frequencies
+
+    # def reset_all_expert_continue(self):
+    #     """重置所有层的计数器"""
+    #     for layer_idx, layer in enumerate(self.layers):
+            
+    #         moe_block = layer.block_sparse_moe
+    #         moe_block.reset_continue_counts()
+            
+    def get_all_expert_hit_rate(self):
+        """获取所有层的缓存命中率的情况"""
+        all_frequencies = {}
+        for layer_idx, layer in enumerate(self.layers):
+            
+            moe_block = layer.block_sparse_moe  # 假设每层有一个 moe_block 属性
+            routed_freq = moe_block.get_expert_hit_rate()
+            all_frequencies[layer_idx] = {"routed": routed_freq}
+            # print(f'sum:{moe_block.total_tokens}')
+        return all_frequencies
+
+    def reset_all_expert_hit_rate(self):
+        """重置所有层的计数器"""
+        for layer_idx, layer in enumerate(self.layers):
+            
+            moe_block = layer.block_sparse_moe
+            moe_block.reset_hit_counts()   
+            
+    def get_all_token_frequency(self):
+        """获取所有层的专家token维度的激活概率"""
+        all_frequencies = {}
+        for layer_idx, layer in enumerate(self.layers):
+            
+            moe_block = layer.block_sparse_moe  # 假设每层有一个 moe_block 属性
+            routed_freq = moe_block.get_token_frequency()
+            all_frequencies[layer_idx] = {"routed": routed_freq}
+            # print(f'sum:{moe_block.total_tokens}')
+        return all_frequencies
+
+    def reset_all_token_frequency(self):
+        """重置所有层的计数器"""
+        for layer_idx, layer in enumerate(self.layers):
+            
+            moe_block = layer.block_sparse_moe
+            moe_block.reset_token_frequency()   
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -751,8 +894,12 @@ class MixtralModel(MixtralPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         all_router_logits = () if output_router_logits else None
+        
+        all_topk_idx = []  # 收集每一层的 topk_idx
+        all_pre_topk_idx = []  # 收集每一层的 pre_topk_idx
+        pre_hidden = None  # 收集每一层的预测器输出
 
-        for decoder_layer in self.layers:
+        for i, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -780,6 +927,7 @@ class MixtralModel(MixtralPreTrainedModel):
                     use_cache=use_cache,
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
+                    prev_attn_hidden_states=pre_hidden,
                     **flash_attn_kwargs,
                 )
 
@@ -788,14 +936,76 @@ class MixtralModel(MixtralPreTrainedModel):
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
+            router_logits_idx = 2 if output_attentions  else 1
+            
+            if output_router_logits and len(layer_outputs) > router_logits_idx:
+                all_router_logits += (layer_outputs[router_logits_idx],)
+
+
             if output_router_logits:
                 all_router_logits += (layer_outputs[-1],)
+                
+            all_topk_idx.append(decoder_layer.block_sparse_moe.last_topk_idx)
+            all_pre_topk_idx.append(decoder_layer.block_sparse_moe.pre_topk_idx)
+            
+            if i >= self.pre_dis:
+                pre_hidden = layer_outputs[-1] 
 
         hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
+            
+        if not self.training :
+            self.iou_scores = []
+            self.accuracy_scores = []
+            for i in range(0, len(self.layers)):  # 从第1层MoE开始，第一层应该是100%相同
+                if (
+                    all_topk_idx[i] is not None and  # 当前层是 MoE 层，有真实 topk_idx
+                    all_pre_topk_idx[i] is not None  # 有预测的 pre_topk_idx
+                ):
+                    # 真实 top-k 索引（last_topk_idx），形状为 [batch_size * seq_len, top_k]
+                    true_topk_idx = all_topk_idx[i]
+                    # 预测 top-k 索引（pre_topk_idx），形状为 [batch_size * seq_len, top_k]
+                    pred_topk_idx = all_pre_topk_idx[i]
+                    batch_size, seq_length = input_ids.shape[:2] if input_ids is not None else inputs_embeds.shape[:2]
+
+                    # 将 true_topk_idx 和 pred_topk_idx 转换为 one-hot 编码
+                    true_topk_onehot = torch.zeros(
+                        batch_size, seq_length, self.config.num_local_experts, device=true_topk_idx.device
+                    )
+                    pred_topk_onehot = torch.zeros_like(true_topk_onehot)
+                    true_topk_idx = true_topk_idx.view(batch_size, seq_length, self.config.num_experts_per_tok)
+                    pred_topk_idx = pred_topk_idx.view(batch_size, seq_length, self.config.num_experts_per_tok)
+                    true_topk_onehot.scatter_(2, true_topk_idx, 1)
+                    pred_topk_onehot.scatter_(2, pred_topk_idx, 1)
+
+                    # 计算 IoU
+                    intersection = (pred_topk_onehot * true_topk_onehot).sum(dim=-1)  # [batch_size, seq_len]
+                    correct = intersection/self.config.num_experts_per_tok  # [batch_size, seq_len]
+                    masked_accuracy = (correct.to(attention_mask.device) * attention_mask).sum() / attention_mask.sum()
+                    union = pred_topk_onehot.sum(dim=-1) + true_topk_onehot.sum(dim=-1) - intersection
+                    iou = intersection / (union + 1e-8)  # [batch_size, seq_len]
+                    masked_iou = (iou.to(attention_mask.device) * attention_mask).sum() / attention_mask.sum()
+
+                    self.iou_scores.append(masked_iou.item())
+
+                    # # 计算准确率（严格匹配：预测的 top-k 与真实的 top-k 完全相同）
+                    # correct = (pred_topk_idx.sort(dim=-1)[0] == true_topk_idx.sort(dim=-1)[0]).all(dim=-1)  # [batch_size, seq_len]
+
+                    # masked_accuracy = (correct.float().to(attention_mask.device) * attention_mask).sum() / attention_mask.sum()
+
+                    self.accuracy_scores.append(masked_accuracy.item())
+                    self.tokens = attention_mask.sum().item()
+            # # 打印平均 IoU 和准确率
+            # if self.iou_scores and self.accuracy_scores:
+            #     avg_iou = sum(self.iou_scores) / len(self.iou_scores)
+            #     avg_accuracy = sum(self.accuracy_scores) / len(self.accuracy_scores)
+            #     print(f"Average IoU across layers: {avg_iou:.4f}, Average Accuracy: {avg_accuracy:.4f}")
+
+            
+            
 
         output = MoeModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -1065,6 +1275,11 @@ class MixtralForCausalLM(MixtralPreTrainedModel, GenerationMixin):
         return self.model.get_all_expert_frequencies()
     def reset_all_expert_counts(self):
         self.model.reset_all_expert_counts()
+        
+    def get_all_layer_top_avg(self):
+        return self.model.get_all_layer_top_avg()
+    def reset_all_layer_top_avg(self):
+        self.model.reset_all_layer_top_avg()     
         
     def get_all_expert_continue(self):
         return self.model.get_all_expert_continue()
