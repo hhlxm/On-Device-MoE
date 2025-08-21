@@ -1,13 +1,3 @@
-#!/bin/bash
-###
- # @Author: hhlxm 578723542@qq.com
- # @Date: 2025-05-23 17:10:12
- # @LastEditors: hhlxm 578723542@qq.com
- # @LastEditTime: 2025-07-01 00:57:12
- # @FilePath: /lxm/Analyse/scripts/run_deepseek.sh
- # @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
-### 
-
 MODEL_NAME="/home/fit/renju/WORK/lxm/models/DeepSeek_V2_Lite"
 MODEL_TYPE="DeepseekV2"
 # CACHE_RATIOS=(0.125 0.25 0.5 0.75)

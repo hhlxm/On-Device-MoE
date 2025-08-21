@@ -1,18 +1,18 @@
 #!/bin/bash
 ###
  # @Author: hhlxm 578723542@qq.com
- # @Date: 2025-04-11 13:39:43
+ # @Date: 2025-05-22 03:20:05
  # @LastEditors: hhlxm 578723542@qq.com
- # @LastEditTime: 2025-04-27 12:49:36
- # @FilePath: /lxm/Predict/scripts/run_deepseek_test.sh
+ # @LastEditTime: 2025-05-22 20:02:00
+ # @FilePath: /lxm/Analyse/scripts/run_deepseek05.sh
  # @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
 ### 
 
 # 配置目录，存储所有 YAML 文件
-CONFIG_DIR="/home/fit/renju/WORK/lxm/Predict/config/qwen/finetune"
+CONFIG_DIR="/home/fit/renju/WORK/lxm/Analyse/config/ablation/freeze/config_deepseek_075"
 
 # Python 脚本路径
-PYTHON_SCRIPT="/home/fit/renju/WORK/lxm/Predict/finetune.py"
+PYTHON_SCRIPT="/home/fit/renju/WORK/lxm/Analyse/eval.py"
 
 # 检查配置目录是否存在
 if [ ! -d "$CONFIG_DIR" ]; then

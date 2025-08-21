@@ -1,12 +1,5 @@
-'''
-Author: hhlxm 578723542@qq.com
-Date: 2025-05-14 20:34:17
-LastEditors: hhlxm 578723542@qq.com
-LastEditTime: 2025-05-14 20:46:40
-FilePath: /lxm/Compression/util.py
-Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
-'''
 import torch
+
 
 @torch.no_grad()
 def binary(x):
@@ -15,28 +8,30 @@ def binary(x):
     x_ = torch.zeros_like(x)
     x_ += x
     binary_slice = torch.where(x_ >= 0, 1, -1)
-    binary_slice = binary_slice/2 + 0.5
+    binary_slice = binary_slice / 2 + 0.5
 
     scale_tensor = scale_tensor.unsqueeze(1).expand(-1, 128)
     zero = zero.unsqueeze(1).expand(-1, 128)
     return scale_tensor * (binary_slice - zero)
+
 
 @torch.no_grad()
 def _quantize(x, scale, zero, maxq):
     q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
     return scale * (q - zero)
 
+
 def quantize(w, wbit):
     perchannel = True
     weight = True
     dev = w.device
-    maxq = torch.tensor(2 ** wbit - 1)
+    maxq = torch.tensor(2**wbit - 1)
     scale = torch.zeros(1)
     zero = torch.zeros(1)
     if dev != scale.device:
-        scale=scale.to(dev)
-        zero=zero.to(dev)
-        maxq=maxq.to(dev)
+        scale = scale.to(dev)
+        zero = zero.to(dev)
+        maxq = maxq.to(dev)
 
     x = w.clone()
     shape = x.shape
@@ -78,6 +73,7 @@ def quantize(w, wbit):
     w = _quantize(w, scale, zero, maxq)
     return w
 
+
 def normal_quantize(w=None, blocksize=128, wbit=2):
     columns = w.shape[1]
     w_q = torch.zeros_like(w)
@@ -92,6 +88,6 @@ def normal_quantize(w=None, blocksize=128, wbit=2):
             Q1 = binary(W1)
         else:
             Q1 = quantize(W1, wbit)
-        
+
         w_q[:, i1:i2] = Q1
     return w_q
