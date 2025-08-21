@@ -1,12 +1,4 @@
 # 定义数据集和对应的 few-shot 策略
-###
- # @Author: hhlxm 578723542@qq.com
- # @Date: 2025-04-16 01:41:13
- # @LastEditors: hhlxm 578723542@qq.com
- # @LastEditTime: 2025-08-03 19:41:34
- # @FilePath: /lxm/run.sh
- # @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
-### 
 declare -A dataset_shots
 dataset_shots=(
     # ["mmlu_prehistory"]=5
@@ -17,7 +9,7 @@ dataset_shots=(
     ['openbookqa']=0
 )
 
-quant_wbit=3
+quant_wbit=2
 quant_num=1
 pre_dis=100
 pre_ahead=100
