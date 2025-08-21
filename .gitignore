@@ -1,0 +1,110 @@
+# 操作系统生成的文件
+###################################
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# 编译输出
+###################################
+build/
+bin/
+out/
+dist/
+target/
+release/
+*.o
+*.obj
+*.dll
+*.exe
+*.so
+
+# 日志和临时文件
+###################################
+*.log
+*.log.*
+*.tmp
+*.swp
+*.swo
+*~
+*.bak
+
+# 依赖和包管理
+###################################
+node_modules/
+jspm_packages/
+bower_components/
+vendor/
+packages/
+Pods/
+Carthage/
+/vendor/bundle/
+.bundle/
+
+# IDE 和编辑器配置文件
+###################################
+.idea/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.project
+.classpath
+.settings/
+*.iml
+*.ipr
+*.iws
+
+# 敏感信息
+###################################
+.env
+.env.local
+.env.*.local
+config.local.js
+*.pem
+*.key
+credentials.json
+secrets.yml
+
+# Python
+###################################
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+venv/
+virtualenv/
+env/
+instance/
+*.egg-info/
+.eggs/
+dist/
+build/
+*.spec
+
+# Java
+###################################
+*.class
+*.jar
+*.war
+*.ear
+target/
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Node.js
+###################################
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 其他
+###################################
+coverage/
+.nyc_output/
