@@ -1,5 +1,4 @@
-srun --partition a01 --gres=gpu:1 --pty "bash"
-
+srun --partition a01 --gres=gpu:2 --pty "bash"
 jupyter notebook  --notebook-dir=/home/fit/renju/WORK/lxm  --ip=0.0.0.0 --port=10059
 
 srun --partition=a01 --gres=gpu:1  --job-name=predict --kill-on-bad-exit=1 --output=/home/fit/renju/WORK/lxm/log.out python /home/fit/renju/WORK/lxm/Compression/quantization.py
