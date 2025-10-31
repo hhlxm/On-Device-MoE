@@ -4,42 +4,43 @@ initial_steps=0
 step_increment=0
 max_iterations=1
 is_first_training=1
-targeted_sparsity_list=(0.5 0.8 0.9)
-model_name="sparse_mixtral_7x8b"
-base_model_repo_id="/home/fit/renju/WORK/lxm/models/Mixtral_8x7B_v0_1"
-# model_name="sparse_llama_7b_hf"
-# base_model_repo_id="/home/fit/renju/WORK/lxm/models/Llama-2-7b-hf"
+targeted_sparsity_list=(0.5)
+# model_name="sparse_mixtral_7x8b"
+# base_model_repo_id="/home/fit/renju/WORK/lxm/models/Mixtral_8x7B_v0_1"
+model_name="sparse_llama_7b_hf"
+base_model_repo_id="/home/pairshoe/lxm_flash/On-Device-MoE/models/Llama-2-7b-hf"
 
 for targeted_sparsity in "${targeted_sparsity_list[@]}"; do
   sparsity_percentage=$(printf "%.0f" $(echo "$targeted_sparsity * 100" | bc))
   echo "Targeted Sparsity Percentage: $sparsity_percentage"
   for ((i=1; i<=max_iterations; i++)); do
-      # current_steps=$((initial_steps + i * step_increment))  # Calculate the number of steps trained so far
+      current_steps=$((initial_steps + i * step_increment))  # Calculate the number of steps trained so far
 
-      # echo "Training for $current_steps steps..."
-      # python  experiments/pretrain_sparse_model.py \
-      #   --use_sparse_model --targeted_sparsity $targeted_sparsity \
-      #   --set_sparsity_aware_threshold --print_sparsity \
-      #   --use_wandb --max_steps $current_steps --model_save \
-      #   --train_batch_size 1 --test_batch_size 2 --use_flash_attn --gradient_accumulation_steps 1 \
-      #   --ds_config_path ds_config.json --max_seq_length 1024  \
-      #   --checkpoint_dir $1 --results_dir $2 --is_first_training $is_first_training \
-      #   --gradient_checkpointing \
-      #   --model_name $model_name \
-      #   --base_model_repo_id $base_model_repo_id \
-      #   --process_index 1
+      echo "Training for $current_steps steps..."
+      python  experiments/pretrain_sparse_model.py \
+        --use_sparse_model --targeted_sparsity $targeted_sparsity \
+        --set_sparsity_aware_threshold --print_sparsity \
+        --use_wandb --max_steps $current_steps --model_save \
+        --train_batch_size 1 --test_batch_size 2 --use_flash_attn --gradient_accumulation_steps 1 \
+        --ds_config_path ds_config.json --max_seq_length 1024  \
+        --checkpoint_dir $1 --results_dir $2 --is_first_training $is_first_training \
+        --gradient_checkpointing \
+        --model_name $model_name \
+        --base_model_repo_id $base_model_repo_id \
+        --process_index 1
 
-      # model_directory=$(cat model_directory1.txt)
-      # echo "model directory: $model_directory"
+      # # model_directory=$(cat model_directory1.txt)
+      # # echo "model directory: $model_directory"
+      # model_directory=/home/fit/renju/WORK/lxm/CATS/t_ckpt_up_sparse/general_finetuning/sparse_mixtral_7x8b_refined_web_${targeted_sparsity}p_no_adapter_0steps
 
-      # echo "Evaluating after $current_steps steps..."
-      python -m lm_eval \
-          --model hf \
-          --model_args pretrained=$model_directory,trust_remote_code=True,parallelize=True,device_map_option="auto" \
-          --tasks mmlu \
-          --batch_size 32 \
-          --log_samples \
-          --output_path ${2}/evaluations/${model_name}_sparse_${sparsity_percentage}p_${current_steps}steps2
+      # # echo "Evaluating after $current_steps steps..."
+      # python -m lm_eval \
+      #     --model hf \
+      #     --model_args pretrained=$model_directory,trust_remote_code=True,parallelize=True,device_map_option="auto" \
+      #     --tasks boolq \
+      #     --batch_size 32 \
+      #     --log_samples \
+      #     --output_path ${2}/evaluations/${model_name}_sparse_${sparsity_percentage}p_${current_steps}steps2
   done
 done
 ##########################################
