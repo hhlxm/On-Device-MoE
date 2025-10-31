@@ -40,11 +40,12 @@ MoE模型是一种计算友好型专家，适合在端侧设备这种计算能�
   - 先查找当前层的缓存，load on-demand专家，然后在moe计算和next token计算的时候开IO去预取下一层的专家
 
 ## Experiment
-- IO与计算时间
+- IO与计算时间【DONE】
   - 下一层预测准确，还存在IO和计算的差异问题吗
     - 存在
-  - **各个不同模型的expert的大小不同，需要测量**
-    - 我们在端侧应该不是测试mixtral这种更大的模型，而是要测比Deepseek-v2-Lite更小的模型的计算与IO的时间
-    - 大的也得测，用上峰值控制
+- **各个不同模型的expert的大小不同，需要测量**【DONE】
+  - 我们在端侧应该不是测试mixtral这种更大的模型，而是要测比Deepseek-v2-Lite更小的模型的计算与IO的时间
+  - 大的也得测，用上峰值控制
+- sparsity预测idx当成ground truth会有多少的acc损失
 
 

@@ -5,10 +5,10 @@ step_increment=0
 max_iterations=1
 is_first_training=1
 targeted_sparsity_list=(0.5)
-# model_name="sparse_mixtral_7x8b"
-# base_model_repo_id="/home/fit/renju/WORK/lxm/models/Mixtral_8x7B_v0_1"
-model_name="sparse_llama_7b_hf"
-base_model_repo_id="/home/pairshoe/lxm_flash/On-Device-MoE/models/Llama-2-7b-hf"
+model_name="sparse_mixtral_7x8b"
+base_model_repo_id="/home/fit/renju/WORK/lxm/models/Mixtral_8x7B_v0_1"
+# model_name="sparse_llama_7b_hf"
+# base_model_repo_id="/home/fit/renju/WORK/lxm/models/Llama-2-7b-hf"
 
 for targeted_sparsity in "${targeted_sparsity_list[@]}"; do
   sparsity_percentage=$(printf "%.0f" $(echo "$targeted_sparsity * 100" | bc))
@@ -29,9 +29,8 @@ for targeted_sparsity in "${targeted_sparsity_list[@]}"; do
         --base_model_repo_id $base_model_repo_id \
         --process_index 1
 
-      # # model_directory=$(cat model_directory1.txt)
-      # # echo "model directory: $model_directory"
-      # model_directory=/home/fit/renju/WORK/lxm/CATS/t_ckpt_up_sparse/general_finetuning/sparse_mixtral_7x8b_refined_web_${targeted_sparsity}p_no_adapter_0steps
+      # model_directory=$(cat model_directory1.txt)
+      # echo "model directory: $model_directory"
 
       # # echo "Evaluating after $current_steps steps..."
       # python -m lm_eval \

@@ -120,8 +120,5 @@ CATS/t_ckpt/
 CATS/t_ckpt_up_sparse/
 CATS/t_res/
 CATS/t_res_up_sparse/
-CATS/utils/
-CATS/flash_gemv/
-
 .gitattributes
 LICENSE

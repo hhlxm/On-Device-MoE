@@ -1,4 +1,4 @@
-srun --partition a01 --gres=gpu:2 --pty "bash"
+srun --partition a01 --gres=gpu:1 --pty "bash"
 jupyter notebook  --notebook-dir=/home/fit/renju/WORK/lxm  --ip=0.0.0.0 --port=10059
 
 srun --partition=a01 --gres=gpu:1  --job-name=predict --kill-on-bad-exit=1 --output=/home/fit/renju/WORK/lxm/log.out python /home/fit/renju/WORK/lxm/Compression/quantization.py
@@ -6,7 +6,7 @@ conda activate lxm_infer
 
 huggingface-cli download --repo-type dataset --resume-download tiiuae/falcon-refinedweb  --local-dir /home/fit/renju/WORK/lxm/datasets/falcon-refinedweb
 
-huggingface-cli download --resume-download ByteDance-Seed/UI-TARS-2B-SFT --local-dir /home/fit/renju/WORK/lxm/models/UI-TARS-2B-SFT
+huggingface-cli download --resume-download HuggingFaceTB/SmolVLM2-500M-Video-Instruct --include "preprocessor_config.json" "processor.json" "special_tokens_map.json" "tokenizer.json" "tokenizer_config.json" "vocab.json" --local-dir /home/fit/renju/WORK/lxm/models/SmolVLM2-500M-Video-Instruct 
 
 
 cinfo -p AI4Good_S1 occupy-reserved
