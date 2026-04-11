@@ -40,7 +40,7 @@ def parse_args():
     )
     parser.add_argument(
         "--sparsity_ratio", type=float, default=0.5,
-        help="Neuron sparsity ratio (0.0 = no sparsity, 0.5 = keep top 50%%)",
+        help="Neuron sparsity ratio (0.5 = keep top 50%%)",
     )
     parser.add_argument(
         "--mode", type=str, default="hybrid",
@@ -56,7 +56,7 @@ def parse_args():
         help="Device to run on (cuda / cpu)",
     )
     parser.add_argument(
-        "--dtype", type=str, default="float16",
+        "--dtype", type=str, default="bfloat16",
         choices=["float16", "bfloat16", "float32"],
         help="Model dtype",
     )
@@ -65,7 +65,7 @@ def parse_args():
 
 def get_sparsity_kwargs(args):
     """Convert CLI mode into forward() keyword arguments."""
-    if args.mode == "none" or args.sparsity_ratio <= 0:
+    if args.mode == "none" or args.sparsity_ratio < 0:
         return {}
     mode_map = {
         "ondemand": {"prefetch": False, "ondemand": True},
@@ -112,8 +112,16 @@ def generate(model, tokenizer, input_ids, max_new_tokens, sparsity_kwargs, devic
     return generated_ids
 
 
+def set_seed(seed=42):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def main():
     args = parse_args()
+    set_seed(42)
 
     dtype_map = {
         "float16": torch.float16,

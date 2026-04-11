@@ -1543,7 +1543,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 prediction_state=prediction_state,
                 next_moe_layer=next_moe,
                 prefetch_expert_ratio=sparsity_config.get(
-                    'prefetch_expert_ratio', 0.8
+                    'prefetch_expert_ratio', 1.0
                 ),
                 is_first_moe=is_first,
             )
@@ -1746,7 +1746,7 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
         neural_sparsity_ratio: float = 0.0,
         prefetch: bool = False,
         ondemand: bool = True,
-        prefetch_expert_ratio: float = 0.8,
+        prefetch_expert_ratio: float = 1.0,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -1787,7 +1787,10 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
         if use_cache:
             use_legacy_cache = not isinstance(past_key_values, Cache)
             if use_legacy_cache:
-                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+                if past_key_values is not None:                                         
+                    past_key_values = DynamicCache.from_legacy_cache(past_key_values)   
+                else:                                                                   
+                    past_key_values = DynamicCache()                                    
             if hasattr(past_key_values, "get_usable_length"):
                 past_key_values_length = past_key_values.get_usable_length(seq_length)
             elif hasattr(past_key_values, "get_seq_length"):
@@ -1961,7 +1964,7 @@ class DeepseekV2ForCausalLM(DeepseekV2PreTrainedModel):
         neural_sparsity_ratio: float = 0.0,
         prefetch: bool = False,
         ondemand: bool = True,
-        prefetch_expert_ratio: float = 0.8,
+        prefetch_expert_ratio: float = 1.0,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -1975,7 +1978,7 @@ class DeepseekV2ForCausalLM(DeepseekV2PreTrainedModel):
                 indices from previous MoE layer).
             ondemand (`bool`, *optional*, defaults to True):
                 Compute actual sparse indices from current layer's up output.
-            prefetch_expert_ratio (`float`, *optional*, defaults to 0.8):
+            prefetch_expert_ratio (`float`, *optional*, defaults to 1.0):
                 In hybrid mode (prefetch+ondemand), fraction of top-k experts to predict.
 
         Returns:
