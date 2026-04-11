@@ -117,8 +117,11 @@ Compression/models/
 
 
 CATS/t_ckpt/
-CATS/t_ckpt_up_sparse/
+CATS/t_ckpt_up/
+CATS/t_ckpt_x/
 CATS/t_res/
-CATS/t_res_up_sparse/
+CATS/t_res_up/
+CATS/t_res_x/
 .gitattributes
 LICENSE
+CATS/t_*

@@ -5,11 +5,12 @@ step_increment=0
 max_iterations=1
 is_first_training=1
 targeted_sparsity_list=(0.5)
-model_name="sparse_mixtral_7x8b"
-base_model_repo_id="/home/fit/renju/WORK/lxm/models/Mixtral_8x7B_v0_1"
-# model_name="sparse_llama_7b_hf"
-# base_model_repo_id="/home/fit/renju/WORK/lxm/models/Llama-2-7b-hf"
-
+# model_name="sparse_mixtral_7x8b"
+# base_model_repo_id="/home/fit/renju/WORK/lxm/models/Mixtral_8x7B_v0_1"
+model_name="sparse_llama_7b_hf"
+base_model_repo_id="/home/pairshoe/lxm_flash/On-Device-MoE/models/Llama-2-7b-hf"
+export CUDA_VISIBLE_DEVICES=7
+echo $CUDA_VISIBLE_DEVICES
 for targeted_sparsity in "${targeted_sparsity_list[@]}"; do
   sparsity_percentage=$(printf "%.0f" $(echo "$targeted_sparsity * 100" | bc))
   echo "Targeted Sparsity Percentage: $sparsity_percentage"
@@ -17,7 +18,7 @@ for targeted_sparsity in "${targeted_sparsity_list[@]}"; do
       current_steps=$((initial_steps + i * step_increment))  # Calculate the number of steps trained so far
 
       echo "Training for $current_steps steps..."
-      python  experiments/pretrain_sparse_model.py \
+      python  ~/lxm_flash/On-Device-MoE/CATS/experiments/pretrain_sparse_model.py \
         --use_sparse_model --targeted_sparsity $targeted_sparsity \
         --set_sparsity_aware_threshold --print_sparsity \
         --use_wandb --max_steps $current_steps --model_save \
@@ -32,10 +33,11 @@ for targeted_sparsity in "${targeted_sparsity_list[@]}"; do
       # model_directory=$(cat model_directory1.txt)
       # echo "model directory: $model_directory"
 
+      # model_directory="/home/pairshoe/lxm_flash/On-Device-MoE/CATS/t_ckpt_x/general_finetuning/sparse_llama_7b_hf_refined_web_50p_no_adapter_0steps"
       # # echo "Evaluating after $current_steps steps..."
       # python -m lm_eval \
       #     --model hf \
-      #     --model_args pretrained=$model_directory,trust_remote_code=True,parallelize=True,device_map_option="auto" \
+      #     --model_args pretrained=$model_directory,trust_remote_code=True,parallelize=True,device_map="auto" \
       #     --tasks boolq \
       #     --batch_size 32 \
       #     --log_samples \
