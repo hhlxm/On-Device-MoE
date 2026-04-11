@@ -1105,7 +1105,12 @@ class DeepseekV2Attention(nn.Module):
                     "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
                     "with a layer index."
                 )
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            if hasattr(past_key_value, "get_usable_length"):
+                kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            elif hasattr(past_key_value, "get_seq_length"):
+                kv_seq_len += past_key_value.get_seq_length(self.layer_idx)
+            else:
+                kv_seq_len += 0
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
 
         q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, position_ids)
@@ -1236,7 +1241,12 @@ class DeepseekV2FlashAttention2(DeepseekV2Attention):
 
         kv_seq_len = value_states.shape[-2]
         if past_key_value is not None:
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            if hasattr(past_key_value, "get_usable_length"):
+                kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            elif hasattr(past_key_value, "get_seq_length"):
+                kv_seq_len += past_key_value.get_seq_length(self.layer_idx)
+            else:
+                kv_seq_len += 0
 
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, position_ids)
@@ -1778,7 +1788,12 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
             use_legacy_cache = not isinstance(past_key_values, Cache)
             if use_legacy_cache:
                 past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            past_key_values_length = past_key_values.get_usable_length(seq_length)
+            if hasattr(past_key_values, "get_usable_length"):
+                past_key_values_length = past_key_values.get_usable_length(seq_length)
+            elif hasattr(past_key_values, "get_seq_length"):
+                past_key_values_length = past_key_values.get_seq_length()
+            else:
+                past_key_values_length = 0
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
@@ -1879,11 +1894,10 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
 
         next_cache = None
         if use_cache:
-            next_cache = (
-                next_decoder_cache.to_legacy_cache()
-                if use_legacy_cache
-                else next_decoder_cache
-            )
+            if use_legacy_cache and hasattr(next_decoder_cache, "to_legacy_cache"):
+                next_cache = next_decoder_cache.to_legacy_cache()
+            else:
+                next_cache = next_decoder_cache
         if not return_dict:
             return tuple(
                 v
@@ -2054,7 +2068,11 @@ class DeepseekV2ForCausalLM(DeepseekV2PreTrainedModel):
             if isinstance(past_key_values, Cache):
                 cache_length = past_key_values.get_seq_length()
                 past_length = past_key_values.seen_tokens
-                max_cache_length = past_key_values.get_max_cache_shape()
+                max_cache_length = (
+                    past_key_values.get_max_cache_shape()
+                    if hasattr(past_key_values, "get_max_cache_shape")
+                    else getattr(past_key_values, "max_cache_len", None)
+                )
             else:
                 cache_length = past_length = past_key_values[0][0].shape[2]
                 max_cache_length = None
