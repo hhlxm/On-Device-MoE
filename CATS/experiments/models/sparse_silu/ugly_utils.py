@@ -24,7 +24,6 @@ from trl import SFTTrainer
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import flash_gemv
 import seaborn as sns
 
 # from experiments.models.sparse_silu.utils import get_mlp_class, get_decoder_class
@@ -63,7 +62,7 @@ from transformers.models.llama.modeling_llama import (
 
 # Mixtral
 from transformers.models.mixtral.modeling_mixtral import(
-    MixtralBLockSparseTop2MLP,
+    MixtralBlockSparseTop2MLP,
     MixtralSparseMoeBlock,
     MixtralDecoderLayer,
     MixtralForCausalLM,
@@ -676,21 +675,23 @@ class MistralSparseSiluMLP(MistralMLP):
         if self.is_profile:
             if x.shape[1] == 1:
                 if self.sp_method == 1:
-                    return flash_gemv.flag_gemv_gemv_inner_bf16(
-                        x,
-                        self.gate_proj.weight,
-                        self.up_proj.weight,
-                        self.down_proj.weight,
-                        self.dead_threshold,
-                    )
+                    # return flash_gemv.flag_gemv_gemv_inner_bf16(
+                    #     x,
+                    #     self.gate_proj.weight,
+                    #     self.up_proj.weight,
+                    #     self.down_proj.weight,
+                    #     self.dead_threshold,
+                    # )
+                    raise NotImplementedError("flash_gemv.flag_gemv_gemv_inner_bf16 is not implemented.")
                 elif self.sp_method == 2:
-                    return flash_gemv.gemv_gemv_triton(
-                        x,
-                        self.act_fn(self.gate_proj(x)),
-                        self.up_proj.weight,
-                        self.wdown_t,
-                        self.dead_threshold,
-                    )
+                    # return flash_gemv.gemv_gemv_triton(
+                    #     x,
+                    #     self.act_fn(self.gate_proj(x)),
+                    #     self.up_proj.weight,
+                    #     self.wdown_t,
+                    #     self.dead_threshold,
+                    # )
+                    raise NotImplementedError("flash_gemv.gemv_gemv_triton is not implemented.")
                 else:
                     post_act = self.act_fn(self.gate_proj(x))
                     dead_neurons = post_act.abs() <= self.dead_threshold
@@ -1014,21 +1015,23 @@ class LlamaSparseSiluMLP(LlamaMLP):
         if self.is_profile:
             if x.shape[1] == 1:
                 if self.sp_method == 1:
-                    return flash_gemv.flag_gemv_gemv_inner_bf16(
-                        x,
-                        self.gate_proj.weight,
-                        self.up_proj.weight,
-                        self.down_proj.weight,
-                        self.dead_threshold,
-                    )
+                    # return flash_gemv.flag_gemv_gemv_inner_bf16(
+                    #     x,
+                    #     self.gate_proj.weight,
+                    #     self.up_proj.weight,
+                    #     self.down_proj.weight,
+                    #     self.dead_threshold,
+                    # )
+                    raise NotImplementedError("flash_gemv.flag_gemv_gemv_inner_bf16 is not implemented.")
                 elif self.sp_method == 2:
-                    return flash_gemv.gemv_gemv_triton(
-                        x,
-                        self.act_fn(self.gate_proj(x)),
-                        self.up_proj.weight,
-                        self.wdown_t,
-                        self.dead_threshold,
-                    )
+                    # return flash_gemv.gemv_gemv_triton(
+                    #     x,
+                    #     self.act_fn(self.gate_proj(x)),
+                    #     self.up_proj.weight,
+                    #     self.wdown_t,
+                    #     self.dead_threshold,
+                    # )
+                    raise NotImplementedError("flash_gemv.gemv_gemv_triton is not implemented.")
                 else:
                     post_act = self.act_fn(self.gate_proj(x))
                     dead_neurons = post_act.abs() <= self.dead_threshold
@@ -1057,12 +1060,92 @@ class LlamaSparseSiluMLP(LlamaMLP):
 
             return self.down_proj(post_act * self.up_proj(x))
 
+        # else:
+        #     self.count += 1
+        #     pre_act = self.gate_proj(x)
+        #     post_act = self.act_fn(pre_act)
+        #     if self.kill_sparse_swish_outputs:
+        #         dead_neurons = post_act.abs() <= self.dead_threshold
+        #         dead_percentage = dead_neurons.float().mean()
+        #         agg_sparsity = dead_neurons.all(dim=0).float().mean()
+
+        #         if self.is_stats:
+        #             self.dead_percentage = (self.dead_percentage * self.visit_counts + dead_percentage) / (
+        #                 self.visit_counts + 1
+        #             )
+        #             self.agg_sparsity = (self.agg_sparsity * self.visit_counts + agg_sparsity) / (self.visit_counts + 1)
+        #             self.visit_counts += 1
+
+        #             self.a = dead_percentage
+
+        #             # Collect histogram stats
+        #             # if self.is_collect_histogram and pre_act.eq(0).float().mean() < 0.99:  # Padded dataset
+        #             if self.is_collect_histogram:  # Padded dataset
+        #                 self.collect_stats(pre_act, post_act)
+
+        #         post_act[dead_neurons] = 0
+
+        #     out = self.down_proj(post_act * self.up_proj(x))
+        #     if self.use_sparse_regularization:
+        #         if self.regularization_type == "L1 regularization":
+        #             self.activation_norm = torch.abs(post_act)[
+        #                 torch.abs(post_act) < self.regularization_threshold
+        #             ].mean()
+        #         elif self.regularization_type == "L2 regularization":
+        #             self.activation_norm = torch.sqrt(
+        #                 torch.square(post_act)[torch.abs(post_act) < self.regularization_threshold]
+        #             ).mean()
+
+        #     return out
+        # else:
+        #     self.count += 1
+        #     # pre_act = self.w1(x)
+        #     # post_act = self.act_fn(pre_act)
+        #     pre_act = x
+        #     post_act = self.up_proj(pre_act)
+        #     if self.kill_sparse_swish_outputs:
+        #         dead_neurons = post_act.abs() <= self.dead_threshold
+        #         # print("pre act sparsity: ", (pre_act==0).float().mean())
+        #         dead_percentage = dead_neurons.float().mean()
+        #         agg_sparsity = dead_neurons.all(dim=0).float().mean()
+
+        #         if self.is_stats:
+        #             self.dead_percentage = (self.dead_percentage * self.visit_counts + dead_percentage) / (
+        #                 self.visit_counts + 1
+        #             )
+        #             self.agg_sparsity = (self.agg_sparsity * self.visit_counts + agg_sparsity) / (self.visit_counts + 1)
+        #             self.visit_counts += 1
+
+        #             self.a = dead_percentage
+
+        #             # Collect histogram stats
+        #             if self.is_collect_histogram :  # Padded dataset
+        #                 self.collect_stats(pre_act, post_act)
+
+        #         post_act[dead_neurons] = 0
+
+        #     out = self.down_proj(self.act_fn(self.gate_proj(x)) * post_act)
+        #     # out = self.w2(post_act * self.w3(x))
+        #     if self.use_sparse_regularization:
+        #         if self.regularization_type == "L1 regularization":
+        #             self.activation_norm = torch.abs(post_act)[
+        #                 torch.abs(post_act) < self.regularization_threshold
+        #             ].mean()
+        #         elif self.regularization_type == "L2 regularization":
+        #             self.activation_norm = torch.sqrt(
+        #                 torch.square(post_act)[torch.abs(post_act) < self.regularization_threshold]
+        #             ).mean()
+
+        #     return out
+        
         else:
             self.count += 1
-            pre_act = self.gate_proj(x)
-            post_act = self.act_fn(pre_act)
+            # pre_act = self.w1(x)
+            # post_act = self.act_fn(pre_act)
+            
             if self.kill_sparse_swish_outputs:
-                dead_neurons = post_act.abs() <= self.dead_threshold
+                dead_neurons = x.abs() <= self.dead_threshold
+                # print("pre act sparsity: ", (pre_act==0).float().mean())
                 dead_percentage = dead_neurons.float().mean()
                 agg_sparsity = dead_neurons.all(dim=0).float().mean()
 
@@ -1076,13 +1159,15 @@ class LlamaSparseSiluMLP(LlamaMLP):
                     self.a = dead_percentage
 
                     # Collect histogram stats
-                    # if self.is_collect_histogram and pre_act.eq(0).float().mean() < 0.99:  # Padded dataset
-                    if self.is_collect_histogram:  # Padded dataset
-                        self.collect_stats(pre_act, post_act)
+                    if self.is_collect_histogram :  # Padded dataset
+                        self.collect_stats(x, x)
 
-                post_act[dead_neurons] = 0
+                x[dead_neurons] = 0
 
-            out = self.down_proj(post_act * self.up_proj(x))
+            pre_act = x
+            post_act = self.up_proj(pre_act)
+            out = self.down_proj(self.act_fn(self.gate_proj(x)) * post_act)
+            # out = self.w2(post_act * self.w3(x))
             if self.use_sparse_regularization:
                 if self.regularization_type == "L1 regularization":
                     self.activation_norm = torch.abs(post_act)[
@@ -1203,7 +1288,7 @@ class LlamaSparseDecoderLayer(LlamaDecoderLayer):
         return outputs
 
 # Mixtral 稀疏MLP
-class MixtralSparseSiluMLP(MixtralBLockSparseTop2MLP):
+class MixtralSparseSiluMLP(MixtralBlockSparseTop2MLP):
     def __init__(self, config, *args, **kwargs):
         super().__init__(config)
         self.swish_outputs = None
@@ -1277,21 +1362,23 @@ class MixtralSparseSiluMLP(MixtralBLockSparseTop2MLP):
         if self.is_profile:
             if x.shape[1] == 1:
                 if self.sp_method == 1:
-                    return flash_gemv.flag_gemv_gemv_inner_bf16(
-                        x,
-                        self.w1.weight,
-                        self.w3.weight,
-                        self.w2.weight,
-                        self.dead_threshold,
-                    )
+                    # return flash_gemv.flag_gemv_gemv_inner_bf16(
+                    #     x,
+                    #     self.w1.weight,
+                    #     self.w3.weight,
+                    #     self.w2.weight,
+                    #     self.dead_threshold,
+                    # )
+                    raise NotImplementedError("flash_gemv.flag_gemv_gemv_inner_bf16 is not implemented.")
                 elif self.sp_method == 2:
-                    return flash_gemv.gemv_gemv_triton(
-                        x,
-                        self.act_fn(self.w1(x)),
-                        self.w3.weight,
-                        self.wdown_t,
-                        self.dead_threshold,
-                    )
+                    # return flash_gemv.gemv_gemv_triton(
+                    #     x,
+                    #     self.act_fn(self.w1(x)),
+                    #     self.w3.weight,
+                    #     self.wdown_t,
+                    #     self.dead_threshold,
+                    # )
+                    raise NotImplementedError("flash_gemv.gemv_gemv_triton is not implemented.")
                 else:
                     post_act = self.act_fn(self.w1(x))
                     dead_neurons = post_act.abs() <= self.dead_threshold

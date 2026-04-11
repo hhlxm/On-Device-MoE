@@ -385,7 +385,10 @@ class DeepseekV2MLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        down_activation = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+        down_proj = self.down_proj(down_activation)
+        if down_activation.shape[1] == 1:
+            return down_proj, down_activation
         return down_proj
 
 
@@ -1378,6 +1381,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
             )
+        is_decode = hidden_states.shape[1] == 1 and past_key_value is not None
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -1397,7 +1401,11 @@ class DeepseekV2DecoderLayer(nn.Module):
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        down_activation = None
+        if not is_decode:
+            hidden_states = self.mlp(hidden_states)
+        else:
+            hidden_states,down_activation = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -1407,6 +1415,11 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         if use_cache:
             outputs += (present_key_value,)
+        
+        if down_activation is not None:
+            outputs += (down_activation,)
+        else:
+            outputs += (None,)
 
         return outputs
 
@@ -1523,6 +1536,86 @@ DeepseekV2_INPUTS_DOCSTRING = r"""
             Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
 """
 
+class CosineSimilarityTracker:
+    def __init__(self, dim=-1):
+        """
+        dim: 计算余弦相似度的维度（通常 -1 表示最后一维）
+        self.similarities: 字典，用于存储不同层（idx）的平均余弦相似度。
+                          每个entry是一个字典 {'average_sim': float, 'count': int}
+        """
+        self.dim = dim
+        self.similarities = {}
+
+    def compute(self, x1, x2):
+        """
+        输入两个 tensor，计算余弦相似度。
+        """
+        # 确保输入是浮点类型
+        x1 = x1.float()
+        x2 = x2.float()
+        sim = F.cosine_similarity(x1, x2, dim=self.dim)
+        return sim
+
+    def update(self, idx: int, x1, x2):
+        """
+        计算指定层（idx）的余弦相似度，并将其与历史值进行平均更新。
+
+        Args:
+            idx (int): 层的索引，用于作为字典的key。
+            x1 (torch.Tensor): 第一个输入的 tensor。
+            x2 (torch.Tensor): 第二个输入的 tensor。
+        """
+        current_sim = self.compute(x1, x2).item() # 获取当前计算的相似度（Python浮点数）
+
+        if idx not in self.similarities:
+            # 如果是第一次见到这个idx，初始化其平均值和计数
+            self.similarities[idx] = {'average_sim': current_sim, 'count': 1}
+            print(f"Initialized cosine similarity for idx {idx}: {current_sim:.4f}")
+        else:
+            # 如果idx已存在，进行加权平均更新
+            old_data = self.similarities[idx]
+            old_avg_sim = old_data['average_sim']
+            old_count = old_data['count']
+
+            new_count = old_count + 1
+            # 新的平均值 = (旧的平均值 * 旧的计数 + 新的相似度) / 新的计数
+            new_avg_sim = (old_avg_sim * old_count + current_sim) / new_count
+
+            self.similarities[idx] = {'average_sim': new_avg_sim, 'count': new_count}
+            print(f"Updated cosine similarity for idx {idx} (count={new_count}): {new_avg_sim:.4f} (current sim: {current_sim:.4f})")
+
+    def get_similarity(self, idx: int = None):
+        """
+        获取指定层或所有层的平均余弦相似度。
+
+        Args:
+            idx (int, optional): 要获取相似度的层索引。
+                                 如果为 None，则返回所有层的相似度字典。
+
+        Returns:
+            float or dict: 如果指定了 idx，则返回该层的平均余弦相似度（浮点数）；
+                           如果 idx 为 None，则返回包含所有层平均相似度的字典。
+                           如果指定的 idx 不存在，则返回 None。
+        """
+        if idx is None:
+            # 返回一个只包含平均相似度值的字典，不暴露内部的count
+            return {k: v['average_sim'] for k, v in self.similarities.items()}
+        else:
+            data = self.similarities.get(idx, None)
+            return data['average_sim'] if data else None
+
+    def print_all_similarities(self):
+        """
+        打印所有已记录的层的平均余弦相似度及其更新次数。
+        """
+        if not self.similarities:
+            print("No cosine similarities recorded yet.")
+            return
+
+        print("\n--- All Recorded Average Cosine Similarities ---")
+        for idx, data in self.similarities.items():
+            print(f"Idx {idx}: Average Sim = {data['average_sim']:.4f}, Updates = {data['count']}")
+        print("----------------------------------------------")
 
 @add_start_docstrings(
     "The bare DeepseekV2 Model outputting raw hidden-states without any specific head on top.",
@@ -1558,6 +1651,8 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
+        self.config = config
+        self.cosine_tracker = CosineSimilarityTracker(dim=config.moe_intermediate_size)
 
     # Request Level
     def get_all_expert_frequencies(self):
@@ -1759,8 +1854,10 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
+        is_decode = seq_length == 1 and past_key_values is not None
+        previous_down_activation = None
 
-        for decoder_layer in self.layers:
+        for (layer_idx, decoder_layer) in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -1785,6 +1882,11 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
                 )
 
             hidden_states = layer_outputs[0]
+            if is_decode:
+                if layer_idx >= self.config.first_k_dense_replace and layer_idx % self.config.moe_layer_freq == 0 and previous_down_activation is not None:
+                    assert layer_outputs[-1] is not None, "Expected down activation in layer outputs during decoding."
+                    self.cosine_tracker.update(layer_idx, layer_outputs[-1], previous_down_activation)
+                previous_down_activation = layer_outputs[-1]
 
             if use_cache:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]

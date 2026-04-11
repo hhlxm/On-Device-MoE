@@ -27,8 +27,8 @@ import argparse
 import time
 import warnings
 import json
-
-from experiments.models.sparse_silu.ugly_utils import *
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from experiments.models.sparse_silu.ugly_utils import * 
 
 # from experiments.models.sparse_silu.callbacks import GracefulRegularizationScheduler
 # from trainer import SparseTrainer
@@ -286,7 +286,7 @@ def train(exp_config, use_wandb: bool = True, use_sweep: bool = False):
     ds_print("--------------aug setting-----------------")
     trainer_config = TrainingArguments(
         output_dir=checkpoint_dir,
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         eval_steps=25,  # early stopping counts only when eval step and save step match
         max_steps=10 if is_debugging else exp_config.max_steps,
         save_steps=min(250, exp_config.max_steps),
