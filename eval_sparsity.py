@@ -215,7 +215,7 @@ def main():
         config=config,
         torch_dtype=dtype_map[args.dtype],
         device_map=device_map,
-        trust_remote_code=False,
+        trust_remote_code=False
     )
     model.eval()
 
@@ -257,6 +257,7 @@ def main():
         numpy_random_seed=seed[1],
         torch_random_seed=seed[2],
         fewshot_random_seed=seed[3],
+        confirm_run_unsafe_code=True
     )
 
     # Only main process prints and saves
