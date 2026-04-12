@@ -794,8 +794,9 @@ class DeepseekV2MoE(nn.Module):
         next_gate = next_moe_layer.gate
 
         # ---- 1. predict routing ----
+        gate_device = next_gate.weight.device
         logits = F.linear(
-            ffn_input.float(), next_gate.weight.float(), None
+            ffn_input.float().to(gate_device), next_gate.weight.float(), None
         )
         if next_gate.scoring_func == "softmax":
             scores = logits.softmax(dim=-1, dtype=torch.float32)
@@ -841,16 +842,16 @@ class DeepseekV2MoE(nn.Module):
         # ---- 2. predict neuron sparsity ----
         pred_sparse = torch.zeros(
             n_tokens, n_pred, n_keep,
-            dtype=torch.long, device=ffn_input.device
+            dtype=torch.long, device=gate_device
         )
         for token_idx in range(n_tokens):
             for slot in range(n_pred):
                 eid = pred_idx[token_idx, slot].item()
-                up_pred = next_moe_layer.experts[eid].up_proj(
-                    ffn_input[token_idx:token_idx + 1]
-                )
+                expert_device = next_moe_layer.experts[eid].up_proj.weight.device
+                inp = ffn_input[token_idx:token_idx + 1].to(expert_device)
+                up_pred = next_moe_layer.experts[eid].up_proj(inp)
                 _, sidx = torch.topk(up_pred.abs().squeeze(0), n_keep)
-                pred_sparse[token_idx, slot] = sidx
+                pred_sparse[token_idx, slot] = sidx.to(gate_device)
 
         return {
             'predicted_probs': scores,
