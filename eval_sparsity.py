@@ -40,14 +40,14 @@ import os
 import sys
 from pathlib import Path
 
-import torch
-from transformers import AutoTokenizer, AutoConfig
+from transformers import AutoConfig, AutoModelForCausalLM
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import lm_eval
 from lm_eval.models import huggingface
 
+from models_adapter.deepseek_v2_lite.configuration_deepseek import DeepseekV2Config
 from models_adapter.deepseek_v2_lite.modeling_deepseek_sparsity_pipeline import (
     DeepseekV2ForCausalLM,
 )
@@ -63,7 +63,6 @@ def parse_args():
         "--dtype", type=str, default="bfloat16",
         choices=["float16", "bfloat16", "float32"],
     )
-    p.add_argument("--device_map", type=str, default="auto")
 
     # Sparsity
     p.add_argument(
@@ -150,89 +149,84 @@ def patch_forward_with_sparsity(model, sparsity_ratio, mode, prefetch_expert_rat
     model.forward = patched_forward
 
 
-def _build_device_map(local_rank, world_size, gpus_per_model, default_device_map):
-    """
-    Compute device_map for model parallelism + data parallelism.
-
-    With accelerate launch (world_size > 1), each process (local_rank) gets
-    a non-overlapping slice of GPUs for model-parallel sharding:
-      process 0 → GPU [0, 1, ..., gpus_per_model-1]
-      process 1 → GPU [gpus_per_model, ..., 2*gpus_per_model-1]
-      ...
-
-    GPU indices are relative to CUDA_VISIBLE_DEVICES.
-
-    Single GPU per model → returns {"": gpu_id} (no sharding).
-    Multiple GPUs per model → returns "auto" after restricting visibility.
-    Single process → returns default_device_map (usually "auto").
-    """
-    if world_size <= 1:
-        return default_device_map
-
-    if gpus_per_model == 1:
-        # Pure data parallel: each process owns exactly one GPU
-        return {"": local_rank}
-
-    # Model parallel + data parallel:
-    # Restrict each process to its own GPU slice via CUDA_VISIBLE_DEVICES
-    start_gpu = local_rank * gpus_per_model
-    gpu_ids = list(range(start_gpu, start_gpu + gpus_per_model))
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
-    # After resetting CUDA_VISIBLE_DEVICES, device_map="auto" shards
-    # across the visible GPUs (now only this process's slice).
-    return "auto"
-
-
 def main():
     args = parse_args()
 
-    # Detect distributed env from accelerate launch (no Accelerator() needed -
-    # lm_eval creates its own internally and they would conflict).
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     is_main = local_rank == 0
-
-    dtype_map = {
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "float32": torch.float32,
-    }
 
     if is_main:
         print(f"Loading model: {args.model_path}")
         print(f"Sparsity mode: {args.mode}, ratio: {args.sparsity_ratio}")
         print(f"World size: {world_size}, GPUs per model: {args.gpus_per_model}")
 
-    config = AutoConfig.from_pretrained(args.model_path, trust_remote_code=True)
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+    # ---- Register custom model classes so AutoModelForCausalLM can find them ----
+    # This allows HFLM to load the model from a string path, which enables
+    # proper Accelerator/distributed setup (rank, world_size, data splitting).
+    AutoConfig.register("deepseek_v2", DeepseekV2Config)
+    AutoModelForCausalLM.register(DeepseekV2Config, DeepseekV2ForCausalLM)
 
-    device_map = _build_device_map(
-        local_rank, world_size, args.gpus_per_model, args.device_map
-    )
+    # For model parallel + data parallel: restrict each process to its GPU slice
+    # BEFORE HFLM creates its Accelerator, so device_map="auto" shards correctly.
+    #
+    # Bug fix: read the *current* CUDA_VISIBLE_DEVICES (physical IDs set by the
+    # user, e.g. "4,5,6,7") and slice it, rather than generating logical indices
+    # with range() which would incorrectly point to physical GPUs 0,1,... instead
+    # of the user-specified ones.
+    if world_size > 1 and args.gpus_per_model > 1:
+        visible_env = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if visible_env:
+            physical_ids = [x.strip() for x in visible_env.split(",") if x.strip()]
+        else:
+            import torch
+            physical_ids = [str(i) for i in range(torch.cuda.device_count())]
 
-    model = DeepseekV2ForCausalLM.from_pretrained(
-        args.model_path,
-        config=config,
-        torch_dtype=dtype_map[args.dtype],
-        device_map=device_map,
-        trust_remote_code=False
+        total_visible = len(physical_ids)
+        expected_procs = total_visible // args.gpus_per_model
+        if total_visible % args.gpus_per_model != 0:
+            raise RuntimeError(
+                f"Total visible GPUs ({total_visible}) is not divisible by "
+                f"gpus_per_model ({args.gpus_per_model}). "
+                f"Visible GPUs: {physical_ids}"
+            )
+        if world_size != expected_procs:
+            raise RuntimeError(
+                f"--num_processes should be {expected_procs} "
+                f"({total_visible} GPUs / {args.gpus_per_model} per model), "
+                f"but got world_size={world_size}"
+            )
+
+        start = local_rank * args.gpus_per_model
+        my_ids = physical_ids[start:start + args.gpus_per_model]
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(my_ids)
+        if is_main:
+            print(f"GPU slicing: {total_visible} GPUs -> {world_size} copies, "
+                  f"rank {local_rank} uses physical GPUs {my_ids}")
+
+    # ---- Create HFLM with string path (enables full distributed support) ----
+    hflm_kwargs = dict(
+        pretrained=args.model_path,
+        dtype=args.dtype,
+        batch_size=args.batch_size,
+        trust_remote_code=False,
     )
-    model.eval()
+    if args.gpus_per_model > 1:
+        hflm_kwargs["device_map"] = "auto"
+
+    lm_model = huggingface.HFLM(**hflm_kwargs)
 
     if is_main:
-        print(f"MoE layers: {model.model.moe_layer_indices}")
+        print(f"HFLM rank={lm_model.rank}, world_size={lm_model.world_size}")
+        if hasattr(lm_model._model, "model") and hasattr(lm_model._model.model, "moe_layer_indices"):
+            print(f"MoE layers: {lm_model._model.model.moe_layer_indices}")
 
-    # Inject sparsity kwargs into forward
+    # Inject sparsity kwargs into the underlying model's forward
     patch_forward_with_sparsity(
-        model, args.sparsity_ratio, args.mode, args.prefetch_expert_ratio
+        lm_model._model, args.sparsity_ratio, args.mode, args.prefetch_expert_ratio
     )
 
-    # Wrap for lm_eval (HFLM creates its own Accelerator for distributed)
-    lm_model = huggingface.HFLM(
-        pretrained=model, tokenizer=tokenizer, batch_size=args.batch_size
-    )
-
-    # Run evaluation
+    # ---- Run evaluation ----
     tasks = [t.strip() for t in args.tasks.split(",")]
     task_manager = lm_eval.tasks.TaskManager()
 
@@ -260,8 +254,8 @@ def main():
         confirm_run_unsafe_code=True
     )
 
-    # Only main process prints and saves
-    if not is_main:
+    # Only main process prints and saves (use lm_model.rank for correctness)
+    if lm_model.rank != 0:
         return
 
     if results and "results" in results:
