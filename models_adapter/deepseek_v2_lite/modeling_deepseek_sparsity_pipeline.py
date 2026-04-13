@@ -847,9 +847,10 @@ class DeepseekV2MoE(nn.Module):
         for token_idx in range(n_tokens):
             for slot in range(n_pred):
                 eid = pred_idx[token_idx, slot].item()
-                expert_device = next_moe_layer.experts[eid].up_proj.weight.device
-                inp = ffn_input[token_idx:token_idx + 1].to(expert_device)
-                up_pred = next_moe_layer.experts[eid].up_proj(inp)
+                up_w = next_moe_layer.experts[eid].up_proj.weight
+                up_b = next_moe_layer.experts[eid].up_proj.bias
+                inp = ffn_input[token_idx:token_idx + 1].to(up_w.device)
+                up_pred = F.linear(inp, up_w, up_b)
                 _, sidx = torch.topk(up_pred.abs().squeeze(0), n_keep)
                 pred_sparse[token_idx, slot] = sidx.to(gate_device)
 
