@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # ---------------------- Common config ----------------------
-MODEL_PATH="models/models/DeepSeek_V2_Lite"
+MODEL_PATH="models/DeepSeek_V2_Lite"
 TASKS="mmlu"
 FEWSHOT=5
 SEED=2026
