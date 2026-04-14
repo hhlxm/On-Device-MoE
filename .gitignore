@@ -125,3 +125,5 @@ CATS/t_res_x/
 .gitattributes
 LICENSE
 CATS/t_*
+
+Sparsity_eval/result

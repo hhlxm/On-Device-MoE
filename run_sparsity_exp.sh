@@ -3,7 +3,7 @@
 # Usage: CUDA_VISIBLE_DEVICES=0,2,4,5 bash run_sparsity_exp.sh
 
 MODEL_PATH="models/models/DeepSeek_V2_Lite"
-TASKS="humaneval"
+TASKS="hellaswag,gsm8k"
 FEWSHOT=0
 SEED=2026
 OUTPUT_DIR="Sparsity_eval/result"
@@ -33,7 +33,7 @@ python eval_sparsity.py \
 
 # 2) Hybrid mode: sparsity_ratio = 0.4, 0.5, 0.6, 0.7, 0.8
 IDX=2
-for SP in 0.4 0.5 0.6 0.7 0.8; do
+for SP in 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8; do
     echo ""
     echo "[${IDX}/6] Running hybrid sp=${SP} prefetch_ratio=1.0 ..."
     python eval_sparsity.py \
