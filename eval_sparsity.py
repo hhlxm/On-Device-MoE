@@ -167,10 +167,10 @@ def main():
         print(f"World size: {world_size}, GPUs per model: {args.gpus_per_model}")
 
     # ---- Register custom model classes so AutoModelForCausalLM can find them ----
-    AutoConfig.register("deepseek_v2", DeepseekV2Config)
-    AutoModelForCausalLM.register(DeepseekV2Config, DeepseekV2ForCausalLM)
-    AutoConfig.register("olmoe", OlmoeConfig)
-    AutoModelForCausalLM.register(OlmoeConfig, OlmoeForCausalLM)
+    AutoConfig.register("deepseek_v2", DeepseekV2Config, exist_ok=True)
+    AutoModelForCausalLM.register(DeepseekV2Config, DeepseekV2ForCausalLM, exist_ok=True)
+    AutoConfig.register("olmoe", OlmoeConfig, exist_ok=True)
+    AutoModelForCausalLM.register(OlmoeConfig, OlmoeForCausalLM, exist_ok=True)
 
     # For model parallel + data parallel: restrict each process to its GPU slice
     # BEFORE HFLM creates its Accelerator, so device_map="auto" shards correctly.
