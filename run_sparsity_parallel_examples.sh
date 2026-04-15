@@ -8,44 +8,48 @@
 #    3) MP + DP combined     — model sharded across M GPUs, N/M processes
 #
 #  Usage:
-#    bash run_sparsity_parallel_examples.sh <mp|dp|mp_dp> [GPUS]
+#    bash run_sparsity_parallel_examples.sh <model_type> <mp|dp|mp_dp> [GPUS]
 #
 #  Examples:
-#    bash run_sparsity_parallel_examples.sh mp   "4,5,6,7"
-#    bash run_sparsity_parallel_examples.sh dp   "4,5,6,7"
-#    bash run_sparsity_parallel_examples.sh mp_dp "0,1,2,3,4,5,6,7"
+#    bash run_sparsity_parallel_examples.sh deepseek mp   "4,5,6,7"
+#    bash run_sparsity_parallel_examples.sh olmoe    dp   "4,5,6,7"
+#    bash run_sparsity_parallel_examples.sh deepseek mp_dp "0,1,2,3,4,5,6,7"
 # ==========================================================================
 
 set -euo pipefail
 
-# ---------------------- Common config ----------------------
-MODEL_PATH="models/DeepSeek_V2_Lite"
-TASKS="mmlu"
+# ---------------------- Parse arguments ----------------------
+MODEL_TYPE="${1:-deepseek}"
+PARALLEL_MODE="${2:-mp}"
+GPU_IDS="${3:-0,1,2,3}"
+
+# ---------------------- Per-model config ----------------------
+TASKS="gsm8k,humaneval"
 FEWSHOT=5
 SEED=2026
-OUTPUT_DIR="Sparsity_eval/result"
 BATCH_SIZE="auto:4"
 DTYPE="bfloat16"
-
-MODE="hybrid"
-SPARSITY_RATIO=0.5
 PREFETCH_EXPERT_RATIO=1.0
 
-# ---------------------- Parse arguments ----------------------
-PARALLEL_MODE="${1:-mp}"
-GPU_IDS="${2:-0,1,2,3}"
+case "${MODEL_TYPE}" in
+    deepseek)
+        MODEL_PATH="models/models/DeepSeek_V2_Lite_Chat"
+        OUTPUT_DIR="Sparsity_eval/result/deepseek_v2_lite_chat"
+        ;;
+    olmoe)
+        MODEL_PATH="models/models/OLMoE_1B_7B_0125_Instruct"
+        OUTPUT_DIR="Sparsity_eval/result/olmoe_1b_7b_0125_instruct"
+        ;;
+    *)
+        echo "Unknown model_type: ${MODEL_TYPE}"
+        echo "Usage: $0 <deepseek|olmoe> <mp|dp|mp_dp> [GPU_IDS] [GPUS_PER_MODEL]"
+        exit 1
+        ;;
+esac
 
 # Count GPUs
 IFS=',' read -ra GPU_ARRAY <<< "${GPU_IDS}"
 NUM_GPUS=${#GPU_ARRAY[@]}
-
-echo "=========================================="
-echo "Parallel mode : ${PARALLEL_MODE}"
-echo "GPUs          : ${GPU_IDS} (${NUM_GPUS} total)"
-echo "Model         : ${MODEL_PATH}"
-echo "Tasks         : ${TASKS}"
-echo "Sparsity      : mode=${MODE}, ratio=${SPARSITY_RATIO}"
-echo "=========================================="
 
 
 # ==============================================================
@@ -71,6 +75,7 @@ run_model_parallel() {
     echo ""
 
     CUDA_VISIBLE_DEVICES=${GPU_IDS} python eval_sparsity.py \
+        --model_type "${MODEL_TYPE}" \
         --model_path "${MODEL_PATH}" \
         --tasks "${TASKS}" \
         --num_fewshot ${FEWSHOT} \
@@ -112,6 +117,7 @@ run_data_parallel() {
     CUDA_VISIBLE_DEVICES=${GPU_IDS} \
     accelerate launch --num_processes ${NUM_PROCS} \
         eval_sparsity.py \
+        --model_type "${MODEL_TYPE}" \
         --model_path "${MODEL_PATH}" \
         --tasks "${TASKS}" \
         --num_fewshot ${FEWSHOT} \
@@ -148,7 +154,7 @@ run_data_parallel() {
 #    GPU 4,5: model copy 0  → process 0, samples 0,2,4,...
 #    GPU 6,7: model copy 1  → process 1, samples 1,3,5,...
 # ==============================================================
-GPUS_PER_MODEL=${3:-2}    # 3rd argument, default 2
+GPUS_PER_MODEL=${4:-2}    # 4th argument, default 2
 
 run_mp_dp() {
     if (( NUM_GPUS % GPUS_PER_MODEL != 0 )); then
@@ -165,6 +171,7 @@ run_mp_dp() {
     CUDA_VISIBLE_DEVICES=${GPU_IDS} \
     accelerate launch --num_processes ${NUM_PROCS} \
         eval_sparsity.py \
+        --model_type "${MODEL_TYPE}" \
         --model_path "${MODEL_PATH}" \
         --tasks "${TASKS}" \
         --num_fewshot ${FEWSHOT} \
@@ -180,31 +187,57 @@ run_mp_dp() {
 
 
 # ---------------------- Dispatch ----------------------
-case "${PARALLEL_MODE}" in
-    mp)
-        run_model_parallel
-        ;;
-    dp)
-        run_data_parallel
-        ;;
-    mp_dp)
-        run_mp_dp
-        ;;
-    *)
-        echo "Unknown mode: ${PARALLEL_MODE}"
-        echo "Usage: $0 <mp|dp|mp_dp> [GPU_IDS] [GPUS_PER_MODEL]"
-        echo ""
-        echo "  mp    — Model Parallel:  model sharded across all GPUs"
-        echo "  dp    — Data Parallel:   N model copies, 1 GPU each"
-        echo "  mp_dp — MP + DP:         model sharded across M GPUs, N/M copies"
-        echo ""
-        echo "Examples:"
-        echo "  $0 mp    4,5,6,7          # 4 GPU model parallel"
-        echo "  $0 dp    4,5,6,7          # 4-way data parallel"
-        echo "  $0 mp_dp 0,1,2,3,4,5,6,7 2  # 2 GPU/model, 4 copies"
-        exit 1
-        ;;
-esac
+run_experiment() {
+    echo "=========================================="
+    echo "Model type    : ${MODEL_TYPE}"
+    echo "Parallel mode : ${PARALLEL_MODE}"
+    echo "GPUs          : ${GPU_IDS} (${NUM_GPUS} total)"
+    echo "Model         : ${MODEL_PATH}"
+    echo "Tasks         : ${TASKS}"
+    echo "Sparsity      : mode=${MODE}, ratio=${SPARSITY_RATIO}"
+    echo "=========================================="
+
+    case "${PARALLEL_MODE}" in
+        mp)
+            run_model_parallel
+            ;;
+        dp)
+            run_data_parallel
+            ;;
+        mp_dp)
+            run_mp_dp
+            ;;
+        *)
+            echo "Unknown mode: ${PARALLEL_MODE}"
+            echo "Usage: $0 <deepseek|olmoe> <mp|dp|mp_dp> [GPU_IDS] [GPUS_PER_MODEL]"
+            echo ""
+            echo "  mp    — Model Parallel:  model sharded across all GPUs"
+            echo "  dp    — Data Parallel:   N model copies, 1 GPU each"
+            echo "  mp_dp — MP + DP:         model sharded across M GPUs, N/M copies"
+            echo ""
+            echo "Examples:"
+            echo "  $0 deepseek mp    4,5,6,7"
+            echo "  $0 olmoe    dp    4,5,6,7"
+            echo "  $0 deepseek mp_dp 0,1,2,3,4,5,6,7 2"
+            exit 1
+            ;;
+    esac
+}
+
+echo ""
+echo "[1/2] Running baseline (no sparsity) ..."
+MODE="none"
+SPARSITY_RATIO=0.0
+run_experiment
+
+echo ""
+echo "[2/2] Running hybrid sparsity ratios ..."
+MODE="hybrid"
+for SPARSITY_RATIO in 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8; do
+    echo ""
+    echo "==> Running hybrid sp=${SPARSITY_RATIO} prefetch_ratio=${PREFETCH_EXPERT_RATIO} ..."
+    run_experiment
+done
 
 echo ""
 echo "=========================================="

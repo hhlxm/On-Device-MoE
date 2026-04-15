@@ -1,10 +1,10 @@
 """
-Test script for DeepSeek-V2-Lite with neuron sparsity pipeline.
+Test script for MoE models with neuron sparsity pipeline.
+Supports: DeepSeek-V2-Lite, OLMoE-1B-7B-0125-Instruct
 
 Usage:
-    python test.py --model_path /path/to/DeepSeek-V2-Lite \
-                   --sparsity_ratio 0.5 \
-                   --mode hybrid
+    python test.py --model_type deepseek --model_path /path/to/DeepSeek-V2-Lite
+    python test.py --model_type olmoe --model_path /path/to/OLMoE-1B-7B-0125-Instruct
 """
 
 import argparse
@@ -15,19 +15,45 @@ import time
 import torch
 from transformers import AutoTokenizer, AutoConfig
 
-# Add project root so we can import the custom modeling file
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from models_adapter.deepseek_v2_lite.modeling_deepseek_sparsity_pipeline import (
-    DeepseekV2ForCausalLM,
-)
+
+def load_model(model_type, model_path, torch_dtype, device):
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+
+    if model_type == "deepseek":
+        from models_adapter.deepseek_v2_lite.modeling_deepseek_sparsity_pipeline import (
+            DeepseekV2ForCausalLM,
+        )
+        model = DeepseekV2ForCausalLM.from_pretrained(
+            model_path, config=config, torch_dtype=torch_dtype,
+            device_map=device, trust_remote_code=True,
+        )
+    elif model_type == "olmoe":
+        from models_adapter.olmoe_1b_7b_0125_instruct.modeling_olmoe_sparsity_pipeline import (
+            OlmoeForCausalLM,
+        )
+        model = OlmoeForCausalLM.from_pretrained(
+            model_path, config=config, torch_dtype=torch_dtype,
+            device_map=device, trust_remote_code=True,
+        )
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}")
+
+    model.eval()
+    return model
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="DeepSeek-V2-Lite sparsity test")
+    parser = argparse.ArgumentParser(description="MoE sparsity pipeline test")
+    parser.add_argument(
+        "--model_type", type=str, required=True,
+        choices=["deepseek", "olmoe"],
+        help="Model type: deepseek (DeepSeek-V2-Lite) or olmoe (OLMoE-1B-7B)",
+    )
     parser.add_argument(
         "--model_path", type=str, required=True,
-        help="Local path to DeepSeek-V2-Lite model weights",
+        help="Local path to model weights",
     )
     parser.add_argument(
         "--prompt", type=str,
@@ -36,7 +62,6 @@ def parse_args():
     )
     parser.add_argument(
         "--max_new_tokens", type=int, default=50,
-        help="Maximum number of new tokens to generate",
     )
     parser.add_argument(
         "--sparsity_ratio", type=float, default=0.5,
@@ -45,27 +70,20 @@ def parse_args():
     parser.add_argument(
         "--mode", type=str, default="hybrid",
         choices=["none", "ondemand", "prefetch", "hybrid"],
-        help="Sparsity pipeline mode",
     )
     parser.add_argument(
         "--prefetch_expert_ratio", type=float, default=0.8,
-        help="Fraction of experts to predict in hybrid mode",
     )
-    parser.add_argument(
-        "--device", type=str, default="cuda",
-        help="Device to run on (cuda / cpu)",
-    )
+    parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument(
         "--dtype", type=str, default="bfloat16",
         choices=["float16", "bfloat16", "float32"],
-        help="Model dtype",
     )
     return parser.parse_args()
 
 
 def get_sparsity_kwargs(args):
-    """Convert CLI mode into forward() keyword arguments."""
-    if args.mode == "none" or args.sparsity_ratio < 0:
+    if args.mode == "none" :
         return {}
     mode_map = {
         "ondemand": {"prefetch": False, "ondemand": True},
@@ -81,19 +99,16 @@ def get_sparsity_kwargs(args):
 
 @torch.no_grad()
 def generate(model, tokenizer, input_ids, max_new_tokens, sparsity_kwargs, device):
-    """Simple greedy generation loop with sparsity support."""
     past_key_values = None
     generated_ids = input_ids.clone()
 
     for step in range(max_new_tokens):
         if past_key_values is None:
-            # Prefill: full sequence, no sparsity
             outputs = model(
                 input_ids=generated_ids,
                 use_cache=True,
             )
         else:
-            # Decode: single token with sparsity
             outputs = model(
                 input_ids=generated_ids[:, -1:],
                 past_key_values=past_key_values,
@@ -130,19 +145,12 @@ def main():
     }
     torch_dtype = dtype_map[args.dtype]
 
+    print(f"Model type: {args.model_type}")
     print(f"Loading model from: {args.model_path}")
     print(f"Device: {args.device}, dtype: {args.dtype}")
 
-    config = AutoConfig.from_pretrained(args.model_path, trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
-    model = DeepseekV2ForCausalLM.from_pretrained(
-        args.model_path,
-        config=config,
-        torch_dtype=torch_dtype,
-        device_map=args.device,
-        trust_remote_code=True,
-    )
-    model.eval()
+    model = load_model(args.model_type, args.model_path, torch_dtype, args.device)
 
     print(f"Model loaded. MoE layers: {model.model.moe_layer_indices}")
     print(f"Mode: {args.mode}, sparsity_ratio: {args.sparsity_ratio}")
@@ -175,9 +183,10 @@ def main():
     print(f"Generated {n_new} tokens in {elapsed:.3f}s "
           f"({n_new / elapsed:.1f} tok/s)")
 
-    # Baseline comparison (no sparsity)
-    if args.mode != "none" and args.sparsity_ratio > 0:
+    # Baseline comparison
+    if args.mode != "none" :
         print("\n--- Baseline (no sparsity) ---")
+        set_seed(42)
         start = time.perf_counter()
         baseline_ids = generate(
             model, tokenizer, input_ids, args.max_new_tokens, {}, args.device,
@@ -192,7 +201,6 @@ def main():
         print(f"Generated {n_base} tokens in {elapsed_base:.3f}s "
               f"({n_base / elapsed_base:.1f} tok/s)")
 
-        # Check divergence
         min_len = min(output_ids.shape[1], baseline_ids.shape[1])
         match = (output_ids[0, :min_len] == baseline_ids[0, :min_len]).sum().item()
         print(f"Token match: {match}/{min_len} "
