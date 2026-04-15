@@ -127,3 +127,5 @@ LICENSE
 CATS/t_*
 
 Sparsity_eval/result
+
+plot/result
