@@ -1,34 +1,30 @@
 """
-Evaluate DeepSeek-V2-Lite (sparsity pipeline) with lm-evaluation-harness.
+Evaluate MoE models (sparsity pipeline) with lm-evaluation-harness.
+Supports: DeepSeek-V2-Lite, OLMoE-1B-7B-0125-Instruct
 
 Usage examples:
 
-  # 1) Single GPU (or model parallel across all visible GPUs)
-  CUDA_VISIBLE_DEVICES=0 python eval_sparsity.py \
-      --model_path /path/to/DeepSeek-V2-Lite \
-      --tasks mmlu --num_fewshot 5 --mode none
-
-  # 2) Model parallel only (model sharded across 4 GPUs, single process)
-  CUDA_VISIBLE_DEVICES=4,5,6,7 python eval_sparsity.py \
+  # DeepSeek-V2-Lite
+  python eval_sparsity.py --model_type deepseek \
       --model_path /path/to/DeepSeek-V2-Lite \
       --tasks mmlu --sparsity_ratio 0.5 --mode hybrid
 
-  # 3) Data parallel only (model fits on 1 GPU, 4 copies for speed)
+  # OLMoE-1B-7B
+  python eval_sparsity.py --model_type olmoe \
+      --model_path /path/to/OLMoE-1B-7B-0125-Instruct \
+      --tasks mmlu --sparsity_ratio 0.5 --mode hybrid
+
+  # Data parallel (4 copies)
   CUDA_VISIBLE_DEVICES=4,5,6,7 accelerate launch --num_processes 4 \
-      eval_sparsity.py --model_path /path/to/DeepSeek-V2-Lite \
+      eval_sparsity.py --model_type deepseek \
+      --model_path /path/to/DeepSeek-V2-Lite \
       --tasks mmlu --sparsity_ratio 0.5 --mode hybrid \
       --gpus_per_model 1
 
-  # 4) Model parallel + Data parallel
-  #    8 GPUs total, model needs 2 GPUs -> 4 copies for data parallelism
+  # Model parallel + Data parallel (8 GPUs, 2 per model -> 4 copies)
   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch --num_processes 4 \
-      eval_sparsity.py --model_path /path/to/DeepSeek-V2-Lite \
-      --tasks mmlu --sparsity_ratio 0.5 --mode hybrid \
-      --gpus_per_model 2
-
-  #    4 GPUs total, model needs 2 GPUs -> 2 copies
-  CUDA_VISIBLE_DEVICES=4,5,6,7 accelerate launch --num_processes 2 \
-      eval_sparsity.py --model_path /path/to/DeepSeek-V2-Lite \
+      eval_sparsity.py --model_type deepseek \
+      --model_path /path/to/DeepSeek-V2-Lite \
       --tasks mmlu --sparsity_ratio 0.5 --mode hybrid \
       --gpus_per_model 2
 """
@@ -51,13 +47,22 @@ from models_adapter.deepseek_v2_lite.configuration_deepseek import DeepseekV2Con
 from models_adapter.deepseek_v2_lite.modeling_deepseek_sparsity_pipeline import (
     DeepseekV2ForCausalLM,
 )
+from models_adapter.olmoe_1b_7b_0125_instruct.configuration_olmoe import OlmoeConfig
+from models_adapter.olmoe_1b_7b_0125_instruct.modeling_olmoe_sparsity_pipeline import (
+    OlmoeForCausalLM,
+)
 
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="lm_eval for DeepSeek-V2-Lite with sparsity pipeline"
+        description="lm_eval for MoE models with sparsity pipeline"
     )
     # Model
+    p.add_argument(
+        "--model_type", type=str, default="deepseek",
+        choices=["deepseek", "olmoe"],
+        help="Model type: deepseek (DeepSeek-V2-Lite) or olmoe (OLMoE-1B-7B)",
+    )
     p.add_argument("--model_path", type=str, required=True)
     p.add_argument(
         "--dtype", type=str, default="bfloat16",
@@ -157,15 +162,15 @@ def main():
     is_main = local_rank == 0
 
     if is_main:
-        print(f"Loading model: {args.model_path}")
+        print(f"Loading model ({args.model_type}): {args.model_path}")
         print(f"Sparsity mode: {args.mode}, ratio: {args.sparsity_ratio}")
         print(f"World size: {world_size}, GPUs per model: {args.gpus_per_model}")
 
     # ---- Register custom model classes so AutoModelForCausalLM can find them ----
-    # This allows HFLM to load the model from a string path, which enables
-    # proper Accelerator/distributed setup (rank, world_size, data splitting).
     AutoConfig.register("deepseek_v2", DeepseekV2Config)
     AutoModelForCausalLM.register(DeepseekV2Config, DeepseekV2ForCausalLM)
+    AutoConfig.register("olmoe", OlmoeConfig)
+    AutoModelForCausalLM.register(OlmoeConfig, OlmoeForCausalLM)
 
     # For model parallel + data parallel: restrict each process to its GPU slice
     # BEFORE HFLM creates its Accelerator, so device_map="auto" shards correctly.
