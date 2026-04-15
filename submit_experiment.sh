@@ -22,7 +22,7 @@ SPARSITY_RATIOS="${4:-}"   # e.g. "0.3" or "0.1,0.3,0.5", empty = full sweep
 
 WORK_DIR="/home/fit/renjuliuji/WORK/lxm/On-Device-MoE"
 CONDA_ENV="lxm_eval"
-PARTITION="a01"
+PARTITION="h01"
 NUM_GPU=2
 JOB_NAME="sparsity_${MODEL_TYPE}_${PARALLEL_MODE}"
 
@@ -49,7 +49,8 @@ srun --partition=${PARTITION} \
      --job-name=${JOB_NAME} \
      --kill-on-bad-exit=1 \
      --output="${LOG_FILE}" \
-     bash --login -c "
+     bash -c "
+         source /home/fit/renjuliuji/WORK/anaconda3/etc/profile.d/conda.sh && \
          conda activate ${CONDA_ENV} && \
          cd ${WORK_DIR} && \
          bash run_sparsity_parallel_examples.sh ${MODEL_TYPE} ${PARALLEL_MODE} ${GPU_IDS} 2 ${SPARSITY_RATIOS}
