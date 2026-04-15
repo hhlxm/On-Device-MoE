@@ -694,56 +694,77 @@ class OlmoeSparseMoeBlock(nn.Module):
                                neural_sparsity_ratio, prediction_state,
                                prefetch, ondemand):
         """
-        Per-expert sparse gate/down computation.
+        Sparse expert computation — gate/up are computed in full (original
+        batched matmul), only the activation is masked before down_proj so
+        that zeroed-out neurons contribute nothing.  This avoids weight
+        indexing and keeps all matmuls at their original size.
+
         x:          [n_tokens, hidden_size]
         topk_ids:   [n_tokens, top_k]
         topk_weight:[n_tokens, top_k]
         """
-        n_tokens, hidden_size = x.shape
+        n_tokens, hidden_dim = x.shape
         intermediate_size = self.config.intermediate_size
         n_keep = int(intermediate_size * (1 - neural_sparsity_ratio))
-        n_expert_used = topk_ids.shape[1]
 
-        final_out = torch.zeros(n_tokens, hidden_size,
-                                device=x.device, dtype=x.dtype)
+        final_hidden_states = torch.zeros(
+            n_tokens, hidden_dim, device=x.device, dtype=x.dtype)
 
-        for tok in range(n_tokens):
-            for slot in range(n_expert_used):
-                eid = topk_ids[tok, slot].item()
-                w = topk_weight[tok, slot]
-                expert = self.experts[eid]
-                token = x[tok:tok + 1]
+        expert_mask = F.one_hot(
+            topk_ids, num_classes=self.num_experts).permute(2, 1, 0)
 
-                up_out = expert.up_proj(token)  # [1, intermediate_size]
+        for expert_idx in range(self.num_experts):
+            expert = self.experts[expert_idx]
+            idx, top_x = torch.where(expert_mask[expert_idx])
+            if top_x.numel() == 0:
+                continue
 
-                # --- determine sparse indices ---
-                sparse_idx = None
-                if prefetch and prediction_state is not None:
-                    pred_idx = prediction_state['predicted_expert_idx']
-                    pred_sparse = prediction_state['predicted_sparse_indices']
-                    match = (pred_idx[tok] == eid)
-                    if match.any():
-                        ps = match.nonzero(as_tuple=True)[0][0].item()
+            current_state = x[None, top_x].reshape(-1, hidden_dim)
+
+            # --- full gate & up (original-size matmul) ---
+            up_out = expert.up_proj(current_state)
+            gate_out = expert.gate_proj(current_state)
+            act = expert.act_fn(gate_out) * up_out  # [n_assigned, intermediate]
+
+            # --- build sparse mask ---
+            n_assigned = top_x.shape[0]
+            use_prediction = (prefetch and prediction_state is not None)
+
+            if use_prediction:
+                # per-token: check prediction hit, fallback to ondemand
+                mask = torch.zeros_like(act)
+                pred_experts = prediction_state['predicted_expert_idx']
+                pred_sparse = prediction_state['predicted_sparse_indices']
+                for i in range(n_assigned):
+                    tok = top_x[i].item()
+                    sparse_idx = None
+                    match_m = (pred_experts[tok] == expert_idx)
+                    if match_m.any():
+                        ps = match_m.nonzero(as_tuple=True)[0][0].item()
                         sparse_idx = pred_sparse[tok, ps]
+                    if sparse_idx is None and ondemand:
+                        _, sparse_idx = torch.topk(
+                            up_out[i].abs(), n_keep)
+                    if sparse_idx is not None:
+                        mask[i].scatter_(0, sparse_idx, 1.0)
+                    else:
+                        mask[i] = 1.0
+            else:
+                # pure ondemand — fully vectorized, no Python loop
+                _, topk_indices = torch.topk(
+                    up_out.abs(), n_keep, dim=-1)
+                mask = torch.zeros_like(act)
+                mask.scatter_(-1, topk_indices, 1.0)
 
-                if sparse_idx is None and ondemand:
-                    _, sparse_idx = torch.topk(up_out.abs().squeeze(0), n_keep)
+            act = act * mask
 
-                if sparse_idx is None:
-                    gate_out = expert.gate_proj(token)
-                    act_out = expert.act_fn(gate_out) * up_out
-                    down_out = expert.down_proj(act_out)
-                else:
-                    gate_w = expert.gate_proj.weight[sparse_idx, :]
-                    gate_out = F.linear(token, gate_w)
-                    up_sparse = up_out[:, sparse_idx]
-                    act_out = expert.act_fn(gate_out) * up_sparse
-                    down_w = expert.down_proj.weight[:, sparse_idx]
-                    down_out = F.linear(act_out, down_w)
+            # --- full down_proj (zeros contribute nothing) ---
+            current_hidden = (expert.down_proj(act)
+                              * topk_weight[top_x, idx, None])
+            final_hidden_states.index_add_(
+                0, top_x, current_hidden.to(x.dtype))
 
-                final_out[tok] += w * down_out.squeeze(0)
-
-        return final_out
+        return final_hidden_states
 
     @torch.no_grad()
     def _predict_next_layer(self, ffn_input, next_moe_block,
@@ -816,22 +837,10 @@ class OlmoeSparseMoeBlock(nn.Module):
 
         # --- expert computation ---
         if is_first_moe:
-            # full computation for first MoE layer
-            final_hidden_states = torch.zeros(
-                batch_size * sequence_length, hidden_dim,
-                dtype=x.dtype, device=x.device)
-            expert_mask = F.one_hot(
-                selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
-            for expert_idx in range(self.num_experts):
-                idx, top_x = torch.where(expert_mask[expert_idx])
-                if top_x.numel() == 0:
-                    continue
-                current_state = x[None, top_x].reshape(-1, hidden_dim)
-                current_hidden = (self.experts[expert_idx](current_state)
-                                  * routing_weights[top_x, idx, None])
-                final_hidden_states.index_add_(
-                    0, top_x, current_hidden.to(x.dtype))
-            y = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+            # first MoE layer: no sparsity, use original forward path
+            y, rl = self.forward(hidden_states)
+            if router_logits is None:
+                router_logits = rl
         else:
             y = self._sparse_expert_compute(
                 x, selected_experts, routing_weights,
