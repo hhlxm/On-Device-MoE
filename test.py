@@ -83,7 +83,7 @@ def parse_args():
 
 
 def get_sparsity_kwargs(args):
-    if args.mode == "none" or args.sparsity_ratio < 0:
+    if args.mode == "none" :
         return {}
     mode_map = {
         "ondemand": {"prefetch": False, "ondemand": True},
@@ -184,7 +184,7 @@ def main():
           f"({n_new / elapsed:.1f} tok/s)")
 
     # Baseline comparison
-    if args.mode != "none" and args.sparsity_ratio > 0:
+    if args.mode != "none" :
         print("\n--- Baseline (no sparsity) ---")
         set_seed(42)
         start = time.perf_counter()
