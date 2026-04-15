@@ -37,7 +37,7 @@ case "${MODEL_TYPE}" in
         OUTPUT_DIR="Sparsity_eval/result/deepseek_v2_lite_chat"
         ;;
     olmoe)
-        MODEL_PATH="models/models/OLMoE-1B-7B-0125-Instruct"
+        MODEL_PATH="models/models/OLMoE_1B_7B_0125_Instruct"
         OUTPUT_DIR="Sparsity_eval/result/olmoe_1b_7b_0125_instruct"
         ;;
     *)

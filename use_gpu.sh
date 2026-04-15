@@ -1,4 +1,6 @@
-srun --partition a01 --gres=gpu:1 --pty "bash"
+srun --partition h01 --gres=gpu:1 --pty "bash"
+conda activate lxm_eval
+cd /home/fit/renjuliuji/WORK/lxm/On-Device-MoE
 jupyter notebook  --notebook-dir=/home/fit/renju/WORK/lxm  --ip=0.0.0.0 --port=10059
 
 srun --partition=a01 --gres=gpu:1  --job-name=predict --kill-on-bad-exit=1 --output=/home/fit/renju/WORK/lxm/log.out python /home/fit/renju/WORK/lxm/Compression/quantization.py
@@ -8,7 +10,7 @@ huggingface-cli download --repo-type dataset --resume-download tiiuae/falcon-ref
 
 huggingface-cli download --resume-download HuggingFaceTB/SmolVLM2-500M-Video-Instruct --include "preprocessor_config.json" "processor.json" "special_tokens_map.json" "tokenizer.json" "tokenizer_config.json" "vocab.json" --local-dir /home/fit/renju/WORK/lxm/models/SmolVLM2-500M-Video-Instruct 
 
-huggingface-cli download  --resume-download deepseek-ai/DeepSeek-V2-Lite-Chat --local-dir /home/pairshoe/lxm_flash/On-Device-MoE/models/models/DeepSeek_V2_Lite_Chat
+huggingface-cli download  --resume-download deepseek-ai/DeepSeek-V2-Lite-Chat --local-dir /home/fit/renjuliuji/WORK/lxm/On-Device-MoE/models/DeepSeek_V2_Lite_Chat
 
 cinfo -p AI4Good_S1 occupy-reserved
 scontrol show job  17607627 -d
