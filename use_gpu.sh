@@ -7,10 +7,11 @@ srun --partition=a01 --gres=gpu:1  --job-name=predict --kill-on-bad-exit=1 --out
 conda activate lxm_infer
 
 huggingface-cli download --repo-type dataset --resume-download tiiuae/falcon-refinedweb  --local-dir /home/fit/renju/WORK/lxm/datasets/falcon-refinedweb
-
 huggingface-cli download --resume-download HuggingFaceTB/SmolVLM2-500M-Video-Instruct --include "preprocessor_config.json" "processor.json" "special_tokens_map.json" "tokenizer.json" "tokenizer_config.json" "vocab.json" --local-dir /home/fit/renju/WORK/lxm/models/SmolVLM2-500M-Video-Instruct 
-
 huggingface-cli download  --resume-download deepseek-ai/DeepSeek-V2-Lite-Chat --local-dir /home/fit/renjuliuji/WORK/lxm/On-Device-MoE/models/DeepSeek_V2_Lite_Chat
+
+modelscope download --model Qwen/Qwen1.5-MoE-A2.7B-Chat README.md --local_dir /home/pairshoe/lxm_flash/On-Device-MoE/models/models
+
 
 cinfo -p AI4Good_S1 occupy-reserved
 scontrol show job  17607627 -d

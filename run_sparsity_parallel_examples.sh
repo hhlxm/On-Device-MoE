@@ -8,12 +8,18 @@
 #    3) MP + DP combined     — model sharded across M GPUs, N/M processes
 #
 #  Usage:
-#    bash run_sparsity_parallel_examples.sh <model_type> <mp|dp|mp_dp> [GPUS]
+#    bash run_sparsity_parallel_examples.sh <model_type> <mp|dp|mp_dp> [GPUS] [GPUS_PER_MODEL] [LIMIT]
+#
+#  LIMIT is optional. For mp/dp, the 4th positional argument is LIMIT.
+#  For mp_dp, the 4th positional argument is GPUS_PER_MODEL and the 5th is LIMIT.
+#  You can also set LIMIT via environment variable.
 #
 #  Examples:
 #    bash run_sparsity_parallel_examples.sh deepseek mp   "4,5,6,7"
-#    bash run_sparsity_parallel_examples.sh olmoe    dp   "4,5,6,7"
+#    bash run_sparsity_parallel_examples.sh deepseek mp   "4,5,6,7" 100
+#    bash run_sparsity_parallel_examples.sh olmoe    dp   "3" 50
 #    bash run_sparsity_parallel_examples.sh deepseek mp_dp "0,1,2,3,4,5,6,7"
+#    bash run_sparsity_parallel_examples.sh deepseek mp_dp "0,1,2,3,4,5,6,7" 2 100
 # ==========================================================================
 
 set -euo pipefail
@@ -22,6 +28,26 @@ set -euo pipefail
 MODEL_TYPE="${1:-deepseek}"
 PARALLEL_MODE="${2:-mp}"
 GPU_IDS="${3:-0,1,2,3}"
+LIMIT="${LIMIT:-}"
+
+case "${PARALLEL_MODE}" in
+    mp|dp)
+        LIMIT="${4:-${LIMIT}}"
+        GPUS_PER_MODEL=2
+        ;;
+    mp_dp)
+        GPUS_PER_MODEL="${4:-2}"
+        LIMIT="${5:-${LIMIT}}"
+        ;;
+    *)
+        GPUS_PER_MODEL="${4:-2}"
+        ;;
+esac
+
+LIMIT_ARGS=()
+if [[ -n "${LIMIT}" ]]; then
+    LIMIT_ARGS=(--limit "${LIMIT}")
+fi
 
 # ---------------------- Per-model config ----------------------
 TASKS="gsm8k,humaneval"
@@ -34,15 +60,15 @@ PREFETCH_EXPERT_RATIO=1.0
 case "${MODEL_TYPE}" in
     deepseek)
         MODEL_PATH="models/models/DeepSeek_V2_Lite_Chat"
-        OUTPUT_DIR="Sparsity_eval/result/deepseek_v2_lite_chat"
+        OUTPUT_DIR="Sparsity_eval/result_part/deepseek_v2_lite_chat"
         ;;
     olmoe)
         MODEL_PATH="models/models/OLMoE_1B_7B_0125_Instruct"
-        OUTPUT_DIR="Sparsity_eval/result/olmoe_1b_7b_0125_instruct"
+        OUTPUT_DIR="Sparsity_eval/result_part/olmoe_1b_7b_0125_instruct"
         ;;
     *)
         echo "Unknown model_type: ${MODEL_TYPE}"
-        echo "Usage: $0 <deepseek|olmoe> <mp|dp|mp_dp> [GPU_IDS] [GPUS_PER_MODEL]"
+        echo "Usage: $0 <deepseek|olmoe> <mp|dp|mp_dp> [GPU_IDS] [GPUS_PER_MODEL] [LIMIT]"
         exit 1
         ;;
 esac
@@ -85,6 +111,7 @@ run_model_parallel() {
         --seed ${SEED} \
         --output_dir "${OUTPUT_DIR}" \
         --batch_size "${BATCH_SIZE}" \
+        "${LIMIT_ARGS[@]}" \
         --dtype "${DTYPE}" \
         --gpus_per_model ${NUM_GPUS}
 }
@@ -127,6 +154,7 @@ run_data_parallel() {
         --seed ${SEED} \
         --output_dir "${OUTPUT_DIR}" \
         --batch_size "${BATCH_SIZE}" \
+        "${LIMIT_ARGS[@]}" \
         --dtype "${DTYPE}" \
         --gpus_per_model 1
 }
@@ -154,8 +182,6 @@ run_data_parallel() {
 #    GPU 4,5: model copy 0  → process 0, samples 0,2,4,...
 #    GPU 6,7: model copy 1  → process 1, samples 1,3,5,...
 # ==============================================================
-GPUS_PER_MODEL=${4:-2}    # 4th argument, default 2
-
 run_mp_dp() {
     if (( NUM_GPUS % GPUS_PER_MODEL != 0 )); then
         echo "ERROR: NUM_GPUS (${NUM_GPUS}) must be divisible by GPUS_PER_MODEL (${GPUS_PER_MODEL})"
@@ -181,6 +207,7 @@ run_mp_dp() {
         --seed ${SEED} \
         --output_dir "${OUTPUT_DIR}" \
         --batch_size "${BATCH_SIZE}" \
+        "${LIMIT_ARGS[@]}" \
         --dtype "${DTYPE}" \
         --gpus_per_model ${GPUS_PER_MODEL}
 }
@@ -194,6 +221,7 @@ run_experiment() {
     echo "GPUs          : ${GPU_IDS} (${NUM_GPUS} total)"
     echo "Model         : ${MODEL_PATH}"
     echo "Tasks         : ${TASKS}"
+    echo "Limit         : ${LIMIT:-none}"
     echo "Sparsity      : mode=${MODE}, ratio=${SPARSITY_RATIO}"
     echo "=========================================="
 
@@ -209,16 +237,16 @@ run_experiment() {
             ;;
         *)
             echo "Unknown mode: ${PARALLEL_MODE}"
-            echo "Usage: $0 <deepseek|olmoe> <mp|dp|mp_dp> [GPU_IDS] [GPUS_PER_MODEL]"
+            echo "Usage: $0 <deepseek|olmoe> <mp|dp|mp_dp> [GPU_IDS] [GPUS_PER_MODEL] [LIMIT]"
             echo ""
             echo "  mp    — Model Parallel:  model sharded across all GPUs"
             echo "  dp    — Data Parallel:   N model copies, 1 GPU each"
             echo "  mp_dp — MP + DP:         model sharded across M GPUs, N/M copies"
             echo ""
             echo "Examples:"
-            echo "  $0 deepseek mp    4,5,6,7"
-            echo "  $0 olmoe    dp    4,5,6,7"
-            echo "  $0 deepseek mp_dp 0,1,2,3,4,5,6,7 2"
+            echo "  $0 deepseek mp    4,5,6,7 100"
+            echo "  $0 olmoe    dp    4,5,6,7 0.1"
+            echo "  $0 deepseek mp_dp 0,1,2,3,4,5,6,7 2 100"
             exit 1
             ;;
     esac
@@ -244,4 +272,3 @@ echo "=========================================="
 echo "Done. Results in ${OUTPUT_DIR}/"
 ls -la "${OUTPUT_DIR}"/*.json 2>/dev/null || true
 echo "=========================================="
-

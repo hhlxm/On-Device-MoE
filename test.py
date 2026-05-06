@@ -1,10 +1,11 @@
 """
 Test script for MoE models with neuron sparsity pipeline.
-Supports: DeepSeek-V2-Lite, OLMoE-1B-7B-0125-Instruct
+Supports: DeepSeek-V2-Lite, OLMoE-1B-7B-0125-Instruct, Qwen1.5-MoE-A2.7B
 
 Usage:
     python test.py --model_type deepseek --model_path /path/to/DeepSeek-V2-Lite
     python test.py --model_type olmoe --model_path /path/to/OLMoE-1B-7B-0125-Instruct
+    python test.py --model_type qwen --model_path /path/to/Qwen1.5-MoE-A2.7B-Chat
 """
 
 import argparse
@@ -37,6 +38,15 @@ def load_model(model_type, model_path, torch_dtype, device):
             model_path, config=config, torch_dtype=torch_dtype,
             device_map=device, trust_remote_code=True,
         )
+    elif model_type == "qwen":
+        from models_adapter.qwen_1_5_moe_a2_7b.modeling_qwen2_moe_sparsity_pipeline import (
+            Qwen2MoeForCausalLM,
+        )
+
+        model = Qwen2MoeForCausalLM.from_pretrained(
+            model_path, config=config, torch_dtype=torch_dtype,
+            device_map=device, trust_remote_code=True,
+        )
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
 
@@ -48,8 +58,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="MoE sparsity pipeline test")
     parser.add_argument(
         "--model_type", type=str, required=True,
-        choices=["deepseek", "olmoe"],
-        help="Model type: deepseek (DeepSeek-V2-Lite) or olmoe (OLMoE-1B-7B)",
+        choices=["deepseek", "olmoe", "qwen"],
+        help="Model type: deepseek, olmoe, or qwen (Qwen1.5-MoE-A2.7B)",
     )
     parser.add_argument(
         "--model_path", type=str, required=True,

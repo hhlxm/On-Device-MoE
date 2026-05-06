@@ -1,17 +1,23 @@
 """
 Evaluate MoE models (sparsity pipeline) with lm-evaluation-harness.
-Supports: DeepSeek-V2-Lite, OLMoE-1B-7B-0125-Instruct
+Supports: DeepSeek-V2-Lite, OLMoE-1B-7B-0125-Instruct, Qwen1.5-MoE-A2.7B
 
 Usage examples:
 
   # DeepSeek-V2-Lite
   python eval_sparsity.py --model_type deepseek \
       --model_path /path/to/DeepSeek-V2-Lite \
-      --tasks mmlu --sparsity_ratio 0.5 --mode hybrid
+      --tasks mmlu --sparsity_ratio 0.5 --mode hybrid \
+      --limit 100
 
   # OLMoE-1B-7B
   python eval_sparsity.py --model_type olmoe \
       --model_path /path/to/OLMoE-1B-7B-0125-Instruct \
+      --tasks mmlu --sparsity_ratio 0.5 --mode hybrid
+
+  # Qwen1.5-MoE-A2.7B
+  python eval_sparsity.py --model_type qwen \
+      --model_path /path/to/Qwen1.5-MoE-A2.7B-Chat \
       --tasks mmlu --sparsity_ratio 0.5 --mode hybrid
 
   # Data parallel (4 copies)
@@ -52,6 +58,33 @@ from models_adapter.olmoe_1b_7b_0125_instruct.modeling_olmoe_sparsity_pipeline i
     OlmoeForCausalLM,
 )
 
+from models_adapter.qwen_1_5_moe_a2_7b.configuration_qwen2_moe import Qwen2MoeConfig
+from models_adapter.qwen_1_5_moe_a2_7b.modeling_qwen2_moe_sparsity_pipeline import (
+    Qwen2MoeForCausalLM,
+)
+
+
+def parse_limit(value):
+    """Parse lm-eval limit: integer sample count or 0-1 dataset fraction."""
+    if value is None:
+        return None
+
+    try:
+        if "." not in value:
+            limit = int(value)
+            if limit <= 0:
+                raise ValueError
+            return limit
+
+        limit = float(value)
+        if not 0 < limit <= 1:
+            raise ValueError
+        return limit
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "--limit must be a positive integer sample count, or a float in (0, 1]."
+        ) from exc
+
 
 def parse_args():
     p = argparse.ArgumentParser(
@@ -60,8 +93,8 @@ def parse_args():
     # Model
     p.add_argument(
         "--model_type", type=str, default="deepseek",
-        choices=["deepseek", "olmoe"],
-        help="Model type: deepseek (DeepSeek-V2-Lite) or olmoe (OLMoE-1B-7B)",
+        choices=["deepseek", "olmoe", "qwen"],
+        help="Model type: deepseek, olmoe, or qwen (Qwen1.5-MoE-A2.7B)",
     )
     p.add_argument("--model_path", type=str, required=True)
     p.add_argument(
@@ -91,6 +124,13 @@ def parse_args():
     )
     p.add_argument("--num_fewshot", type=int, default=5)
     p.add_argument("--batch_size", type=str, default="auto:4")
+    p.add_argument(
+        "--limit",
+        type=parse_limit,
+        default=None,
+        help="Limit evaluation data per task. Use an integer for sample count "
+             "(e.g. 100), or a float in (0, 1] for dataset fraction (e.g. 0.1).",
+    )
     p.add_argument("--seed", type=int, nargs="*", default=[0, 1234, 1234, 1234],
                    help="seed for python, numpy, torch, fewshot (default: 0 1234 1234 1234)")
     p.add_argument(
@@ -129,6 +169,8 @@ def build_output_filename(args):
         if args.mode in ("hybrid", "prefetch"):
             parts.append(f"ep{args.prefetch_expert_ratio}")
     parts.append(f"{args.num_fewshot}shot")
+    if args.limit is not None:
+        parts.append(f"limit{args.limit}")
     return "_".join(parts) + ".json"
 
 
@@ -171,6 +213,8 @@ def main():
     AutoModelForCausalLM.register(DeepseekV2Config, DeepseekV2ForCausalLM, exist_ok=True)
     AutoConfig.register("olmoe", OlmoeConfig, exist_ok=True)
     AutoModelForCausalLM.register(OlmoeConfig, OlmoeForCausalLM, exist_ok=True)
+    AutoConfig.register("qwen2_moe", Qwen2MoeConfig, exist_ok=True)
+    AutoModelForCausalLM.register(Qwen2MoeConfig, Qwen2MoeForCausalLM, exist_ok=True)
 
     # For model parallel + data parallel: restrict each process to its GPU slice
     # BEFORE HFLM creates its Accelerator, so device_map="auto" shards correctly.
@@ -236,7 +280,7 @@ def main():
     task_manager = lm_eval.tasks.TaskManager()
 
     if is_main:
-        print(f"Tasks: {tasks}, num_fewshot: {args.num_fewshot}")
+        print(f"Tasks: {tasks}, num_fewshot: {args.num_fewshot}, limit: {args.limit}")
         print("-" * 60)
 
     # Pad seed list to 4 elements if user provided fewer
@@ -256,6 +300,7 @@ def main():
         numpy_random_seed=seed[1],
         torch_random_seed=seed[2],
         fewshot_random_seed=seed[3],
+        limit=args.limit,
         confirm_run_unsafe_code=True
     )
 

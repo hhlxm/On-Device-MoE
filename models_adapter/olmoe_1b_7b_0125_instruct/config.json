@@ -29,5 +29,6 @@
   "torch_dtype": "bfloat16",
   "transformers_version": "4.47.1",
   "use_cache": false,
-  "vocab_size": 50304
+  "vocab_size": 50304,
+  "_attn_implementation": "flash_attention_2"
 }
