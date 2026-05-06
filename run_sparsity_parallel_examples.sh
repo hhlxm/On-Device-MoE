@@ -18,6 +18,7 @@
 #    bash run_sparsity_parallel_examples.sh deepseek mp   "4,5,6,7"
 #    bash run_sparsity_parallel_examples.sh deepseek mp   "4,5,6,7" 100
 #    bash run_sparsity_parallel_examples.sh olmoe    dp   "3" 50
+#    bash run_sparsity_parallel_examples.sh qwen     dp   "7" 50
 #    bash run_sparsity_parallel_examples.sh deepseek mp_dp "0,1,2,3,4,5,6,7"
 #    bash run_sparsity_parallel_examples.sh deepseek mp_dp "0,1,2,3,4,5,6,7" 2 100
 # ==========================================================================
@@ -66,9 +67,13 @@ case "${MODEL_TYPE}" in
         MODEL_PATH="models/models/OLMoE_1B_7B_0125_Instruct"
         OUTPUT_DIR="Sparsity_eval/result_part/olmoe_1b_7b_0125_instruct"
         ;;
+    qwen)
+        MODEL_PATH="models/models/Qwen1.5-MoE-A2.7B-Chat"
+        OUTPUT_DIR="Sparsity_eval/result_part/qwen_1_5_moe_a2_7b_chat"
+        ;;
     *)
         echo "Unknown model_type: ${MODEL_TYPE}"
-        echo "Usage: $0 <deepseek|olmoe> <mp|dp|mp_dp> [GPU_IDS] [GPUS_PER_MODEL] [LIMIT]"
+        echo "Usage: $0 <deepseek|olmoe|qwen> <mp|dp|mp_dp> [GPU_IDS] [GPUS_PER_MODEL] [LIMIT]"
         exit 1
         ;;
 esac
@@ -237,7 +242,7 @@ run_experiment() {
             ;;
         *)
             echo "Unknown mode: ${PARALLEL_MODE}"
-            echo "Usage: $0 <deepseek|olmoe> <mp|dp|mp_dp> [GPU_IDS] [GPUS_PER_MODEL] [LIMIT]"
+            echo "Usage: $0 <deepseek|olmoe|qwen> <mp|dp|mp_dp> [GPU_IDS] [GPUS_PER_MODEL] [LIMIT]"
             echo ""
             echo "  mp    — Model Parallel:  model sharded across all GPUs"
             echo "  dp    — Data Parallel:   N model copies, 1 GPU each"
@@ -246,6 +251,7 @@ run_experiment() {
             echo "Examples:"
             echo "  $0 deepseek mp    4,5,6,7 100"
             echo "  $0 olmoe    dp    4,5,6,7 0.1"
+            echo "  $0 qwen     dp    7 50"
             echo "  $0 deepseek mp_dp 0,1,2,3,4,5,6,7 2 100"
             exit 1
             ;;
