@@ -710,89 +710,67 @@ class DeepseekV2MoE(nn.Module):
                                neural_sparsity_ratio, prediction_state,
                                prefetch, ondemand):
         """
-        Sparse expert computation — gate/up are computed in full (original
-        batched matmul), only the activation is masked before down_proj so
-        that zeroed-out neurons contribute nothing.  Uses the same
-        sort-group pattern as moe_infer.
+        Sparse expert computation for decode (single-token).
+        Gate and Down use only the top-(1-ratio) neurons selected by |up|.
 
         x:          [n_tokens, hidden_size]
         topk_ids:   [n_tokens, n_expert_used]
         topk_weight:[n_tokens, n_expert_used]
         """
+        n_tokens, hidden_size = x.shape
+        n_expert_used = topk_ids.shape[1]
         intermediate_size = self.config.moe_intermediate_size
         n_keep = int(intermediate_size * (1 - neural_sparsity_ratio))
 
-        # ---- sort tokens by expert (same as moe_infer) ----
-        cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
-        cnts.scatter_(1, topk_ids, 1)
-        tokens_per_expert = cnts.sum(dim=0)
-        idxs = topk_ids.view(-1).argsort()
-        sorted_tokens = x[idxs // topk_ids.shape[1]]
-        # map sorted position → original token index (for prediction lookup)
-        token_indices = idxs // topk_ids.shape[1]
+        final_out = torch.zeros(n_tokens, hidden_size,
+                                device=x.device, dtype=x.dtype)
 
-        tokens_per_expert_np = tokens_per_expert.cpu().numpy()
-        use_prediction = (prefetch and prediction_state is not None)
+        for token_idx in range(n_tokens):
+            for slot in range(n_expert_used):
+                expert_id = topk_ids[token_idx, slot].item()
+                weight = topk_weight[token_idx, slot]
+                expert = self.experts[expert_id]
+                token = x[token_idx:token_idx + 1]  # [1, hidden_size]
 
-        outputs = []
-        start_idx = 0
-        for i, num_tokens in enumerate(tokens_per_expert_np):
-            end_idx = start_idx + num_tokens
-            if num_tokens == 0:
-                continue
-            expert_id = i + self.ep_rank * self.experts_per_rank
-            expert = self.experts[expert_id]
-            tokens_for_expert = sorted_tokens[start_idx:end_idx]
+                # --- full up computation (always needed) ---
+                up_out = expert.up_proj(token)  # [1, intermediate_size]
 
-            # --- full gate & up (original-size matmul) ---
-            up_out = expert.up_proj(tokens_for_expert)
-            gate_out = expert.gate_proj(tokens_for_expert)
-            act = expert.act_fn(gate_out) * up_out
+                # --- determine sparse indices ---
+                sparse_idx = None
 
-            # --- build sparse mask ---
-            if use_prediction:
-                pred_experts = prediction_state['predicted_expert_idx']
-                pred_sparse = prediction_state['predicted_sparse_indices']
-                mask = torch.zeros_like(act)
-                for j in range(int(num_tokens)):
-                    tok = token_indices[start_idx + j].item()
-                    sparse_idx = None
-                    match_m = (pred_experts[tok] == expert_id)
-                    if match_m.any():
-                        ps = match_m.nonzero(as_tuple=True)[0][0].item()
-                        sparse_idx = pred_sparse[tok, ps].to(act.device)
-                    if sparse_idx is None and ondemand:
-                        _, sparse_idx = torch.topk(
-                            up_out[j].abs(), n_keep)
-                    if sparse_idx is not None:
-                        mask[j].scatter_(0, sparse_idx, 1.0)
-                    else:
-                        mask[j] = 1.0
-            else:
-                # pure ondemand — fully vectorized, no Python loop
-                _, topk_indices = torch.topk(
-                    up_out.abs(), n_keep, dim=-1)
-                mask = torch.zeros_like(act)
-                mask.scatter_(-1, topk_indices, 1.0)
+                # try prediction first (prefetch hit)
+                if prefetch and prediction_state is not None:
+                    pred_idx = prediction_state['predicted_expert_idx']
+                    pred_sparse = prediction_state['predicted_sparse_indices']
+                    match = (pred_idx[token_idx] == expert_id)
+                    if match.any():
+                        pred_slot = match.nonzero(as_tuple=True)[0][0].item()
+                        sparse_idx = pred_sparse[token_idx, pred_slot]
 
-            act = act * mask
+                # ondemand fallback: compute from actual |up|
+                if sparse_idx is None and ondemand:
+                    _, sparse_idx = torch.topk(
+                        up_out.abs().squeeze(0), n_keep
+                    )
 
-            # --- full down_proj (zeros contribute nothing) ---
-            outputs.append(expert.down_proj(act))
-            start_idx = end_idx
+                if sparse_idx is None:
+                    # no sparsity info available – full computation
+                    gate_out = expert.gate_proj(token)
+                    act_out = F.silu(gate_out) * up_out
+                    down_out = expert.down_proj(act_out)
+                else:
+                    # sparse gate
+                    gate_w = expert.gate_proj.weight[sparse_idx, :]
+                    gate_out = F.linear(token, gate_w)  # [1, n_keep]
+                    # sparse up gather
+                    up_out_sparse = up_out[:, sparse_idx]  # [1, n_keep]
+                    act_out = F.silu(gate_out) * up_out_sparse
+                    # sparse down
+                    down_w = expert.down_proj.weight[:, sparse_idx]
+                    down_out = F.linear(act_out, down_w)  # [1, hidden_size]
 
-        outs = (torch.cat(outputs, dim=0) if len(outputs)
-                else sorted_tokens.new_empty(0))
+                final_out[token_idx] += weight * down_out.squeeze(0)
 
-        new_x = torch.empty_like(outs)
-        new_x[idxs] = outs
-        final_out = (
-            new_x.view(*topk_ids.shape, -1)
-            .type(topk_weight.dtype)
-            .mul_(topk_weight.unsqueeze(dim=-1))
-            .sum(dim=1)
-            .type(new_x.dtype)
-        )
         return final_out
 
     @torch.no_grad()
