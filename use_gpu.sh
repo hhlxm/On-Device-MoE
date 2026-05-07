@@ -1,7 +1,12 @@
+unset SLURM_JOB_ID
 srun --partition h01 --gres=gpu:1 --pty "bash"
+
 conda activate lxm_eval
 cd /home/fit/renjuliuji/WORK/lxm/On-Device-MoE
+
 jupyter notebook  --notebook-dir=/home/fit/renju/WORK/lxm  --ip=0.0.0.0 --port=10059
+
+ssh -f -N -L 7897:127.0.0.1:7897 login21
 
 srun --partition=a01 --gres=gpu:1  --job-name=predict --kill-on-bad-exit=1 --output=/home/fit/renju/WORK/lxm/log.out python /home/fit/renju/WORK/lxm/Compression/quantization.py
 conda activate lxm_infer

@@ -187,6 +187,9 @@ run_data_parallel() {
 #    GPU 4,5: model copy 0  → process 0, samples 0,2,4,...
 #    GPU 6,7: model copy 1  → process 1, samples 1,3,5,...
 # ==============================================================
+GPUS_PER_MODEL=${4:-2}    # 4th argument, default 2
+SPARSITY_RATIOS="${5:-}"  # 5th argument, optional: e.g. "0.3" or "0.1,0.3,0.5"
+
 run_mp_dp() {
     if (( NUM_GPUS % GPUS_PER_MODEL != 0 )); then
         echo "ERROR: NUM_GPUS (${NUM_GPUS}) must be divisible by GPUS_PER_MODEL (${GPUS_PER_MODEL})"
@@ -258,20 +261,35 @@ run_experiment() {
     esac
 }
 
-echo ""
-echo "[1/2] Running baseline (no sparsity) ..."
-MODE="none"
-SPARSITY_RATIO=0.0
-run_experiment
-
-echo ""
-echo "[2/2] Running hybrid sparsity ratios ..."
-MODE="hybrid"
-for SPARSITY_RATIO in 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8; do
+if [[ -z "${SPARSITY_RATIOS}" ]]; then
+    # No sparsity specified — run baseline + full sweep
     echo ""
-    echo "==> Running hybrid sp=${SPARSITY_RATIO} prefetch_ratio=${PREFETCH_EXPERT_RATIO} ..."
+    echo "[1/2] Running baseline (no sparsity) ..."
+    MODE="none"
+    SPARSITY_RATIO=0.0
     run_experiment
-done
+
+    echo ""
+    echo "[2/2] Running hybrid sparsity ratios ..."
+    MODE="hybrid"
+    for SPARSITY_RATIO in 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8; do
+        echo ""
+        echo "==> Running hybrid sp=${SPARSITY_RATIO} prefetch_ratio=${PREFETCH_EXPERT_RATIO} ..."
+        run_experiment
+    done
+else
+    # Specific sparsity ratios provided (comma-separated)
+    IFS=',' read -ra RATIO_ARRAY <<< "${SPARSITY_RATIOS}"
+    TOTAL=${#RATIO_ARRAY[@]}
+    IDX=0
+    MODE="hybrid"
+    for SPARSITY_RATIO in "${RATIO_ARRAY[@]}"; do
+        IDX=$((IDX + 1))
+        echo ""
+        echo "[${IDX}/${TOTAL}] Running hybrid sp=${SPARSITY_RATIO} prefetch_ratio=${PREFETCH_EXPERT_RATIO} ..."
+        run_experiment
+    done
+fi
 
 echo ""
 echo "=========================================="
