@@ -37,6 +37,7 @@ Usage examples:
 
 import argparse
 import functools
+import importlib
 import json
 import os
 import sys
@@ -50,18 +51,8 @@ import lm_eval
 from lm_eval.models import huggingface
 
 from models_adapter.deepseek_v2_lite.configuration_deepseek import DeepseekV2Config
-from models_adapter.deepseek_v2_lite.modeling_deepseek_sparsity_pipeline import (
-    DeepseekV2ForCausalLM,
-)
 from models_adapter.olmoe_1b_7b_0125_instruct.configuration_olmoe import OlmoeConfig
-from models_adapter.olmoe_1b_7b_0125_instruct.modeling_olmoe_sparsity_pipeline import (
-    OlmoeForCausalLM,
-)
-
 from models_adapter.qwen_1_5_moe_a2_7b.configuration_qwen2_moe import Qwen2MoeConfig
-from models_adapter.qwen_1_5_moe_a2_7b.modeling_qwen2_moe_sparsity_pipeline import (
-    Qwen2MoeForCausalLM,
-)
 
 
 def parse_limit(value):
@@ -97,6 +88,12 @@ def parse_args():
         help="Model type: deepseek, olmoe, or qwen (Qwen1.5-MoE-A2.7B)",
     )
     p.add_argument("--model_path", type=str, required=True)
+    p.add_argument(
+        "--gate",
+        action="store_true",
+        help="Use modeling_xxx_moe_sparsity_pipeline_gate instead of "
+             "modeling_xxx_moe_sparsity_pipeline.",
+    )
     p.add_argument(
         "--dtype", type=str, default="bfloat16",
         choices=["float16", "bfloat16", "float32"],
@@ -146,6 +143,24 @@ def parse_args():
              "Must match --num_processes in accelerate launch.",
     )
     return p.parse_args()
+
+
+def load_model_classes(use_gate):
+    suffix = "_gate" if use_gate else ""
+    deepseek_module = importlib.import_module(
+        f"models_adapter.deepseek_v2_lite.modeling_deepseek_sparsity_pipeline{suffix}"
+    )
+    olmoe_module = importlib.import_module(
+        f"models_adapter.olmoe_1b_7b_0125_instruct.modeling_olmoe_sparsity_pipeline{suffix}"
+    )
+    qwen_module = importlib.import_module(
+        f"models_adapter.qwen_1_5_moe_a2_7b.modeling_qwen2_moe_sparsity_pipeline{suffix}"
+    )
+    return (
+        deepseek_module.DeepseekV2ForCausalLM,
+        olmoe_module.OlmoeForCausalLM,
+        qwen_module.Qwen2MoeForCausalLM,
+    )
 
 
 MODE_MAP = {
@@ -205,10 +220,12 @@ def main():
 
     if is_main:
         print(f"Loading model ({args.model_type}): {args.model_path}")
+        print(f"Model adapter: {'gate' if args.gate else 'standard'} sparsity pipeline")
         print(f"Sparsity mode: {args.mode}, ratio: {args.sparsity_ratio}")
         print(f"World size: {world_size}, GPUs per model: {args.gpus_per_model}")
 
     # ---- Register custom model classes so AutoModelForCausalLM can find them ----
+    DeepseekV2ForCausalLM, OlmoeForCausalLM, Qwen2MoeForCausalLM = load_model_classes(args.gate)
     AutoConfig.register("deepseek_v2", DeepseekV2Config, exist_ok=True)
     AutoModelForCausalLM.register(DeepseekV2Config, DeepseekV2ForCausalLM, exist_ok=True)
     AutoConfig.register("olmoe", OlmoeConfig, exist_ok=True)
