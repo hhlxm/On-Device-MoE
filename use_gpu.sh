@@ -1,7 +1,8 @@
 unset SLURM_JOB_ID
 srun --partition h01 --gres=gpu:1 --pty "bash"
 
-conda activate lxm_eval
+conda activate eval1
+proxychains bash scripts/zero_shot_evaluation_without_general_finetuning.sh  /home/pairshoe/lxm_flash/On-Device-MoE/Sparsity_eval/CATS/olmoe/ckpt /home/pairshoe/lxm_flash/On-Device-MoE/Sparsity_eval/CATS/olmoe/result
 cd /home/fit/renjuliuji/WORK/lxm/On-Device-MoE
 
 jupyter notebook  --notebook-dir=/home/fit/renju/WORK/lxm  --ip=0.0.0.0 --port=10059

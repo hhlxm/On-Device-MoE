@@ -8,8 +8,11 @@
 #    3) MP + DP combined     — model sharded across M GPUs, N/M processes
 #
 #  Usage:
-#    bash run_sparsity_parallel_examples.sh <model_type> <mp|dp|mp_dp> [GPUS] [GPUS_PER_MODEL] [LIMIT]
+#    bash run_sparsity_parallel_examples.sh <model_type> <mp|dp|mp_dp> [GPUS] [extra args...] [--gate]
 #
+#  --gate is optional and can appear anywhere. When enabled, eval_sparsity.py
+#  imports modeling_xxx_moe_sparsity_pipeline_gate instead of the standard
+#  modeling_xxx_moe_sparsity_pipeline modules.
 #  LIMIT is optional. For mp/dp, the 4th positional argument is LIMIT.
 #  For mp_dp, the 4th positional argument is GPUS_PER_MODEL and the 5th is LIMIT.
 #  You can also set LIMIT via environment variable.
@@ -21,11 +24,35 @@
 #    bash run_sparsity_parallel_examples.sh qwen     dp   "7" 50
 #    bash run_sparsity_parallel_examples.sh deepseek mp_dp "0,1,2,3,4,5,6,7"
 #    bash run_sparsity_parallel_examples.sh deepseek mp_dp "0,1,2,3,4,5,6,7" 2 100
+#    bash run_sparsity_parallel_examples.sh qwen     dp   "7" 2 0.3 --gate
 # ==========================================================================
 
 set -euo pipefail
 
 # ---------------------- Parse arguments ----------------------
+USE_GATE=0
+POSITIONAL_ARGS=()
+for arg in "$@"; do
+    case "${arg}" in
+        --gate)
+            USE_GATE=1
+            ;;
+        *)
+            POSITIONAL_ARGS+=("${arg}")
+            ;;
+    esac
+done
+set -- "${POSITIONAL_ARGS[@]}"
+
+GATE_ARGS=()
+RESULT_DIR_PREFIX="result_part"
+GATE_LABEL="disabled"
+if (( USE_GATE )); then
+    GATE_ARGS=(--gate)
+    RESULT_DIR_PREFIX="result_part_gate"
+    GATE_LABEL="enabled"
+fi
+
 MODEL_TYPE="${1:-deepseek}"
 PARALLEL_MODE="${2:-mp}"
 GPU_IDS="${3:-0,1,2,3}"
@@ -61,15 +88,15 @@ PREFETCH_EXPERT_RATIO=1.0
 case "${MODEL_TYPE}" in
     deepseek)
         MODEL_PATH="models/models/DeepSeek_V2_Lite_Chat"
-        OUTPUT_DIR="Sparsity_eval/result_part/deepseek_v2_lite_chat"
+        OUTPUT_DIR="Sparsity_eval/${RESULT_DIR_PREFIX}/deepseek_v2_lite_chat"
         ;;
     olmoe)
         MODEL_PATH="models/models/OLMoE_1B_7B_0125_Instruct"
-        OUTPUT_DIR="Sparsity_eval/result_part/olmoe_1b_7b_0125_instruct"
+        OUTPUT_DIR="Sparsity_eval/${RESULT_DIR_PREFIX}/olmoe_1b_7b_0125_instruct"
         ;;
     qwen)
         MODEL_PATH="models/models/Qwen1.5-MoE-A2.7B-Chat"
-        OUTPUT_DIR="Sparsity_eval/result_part/qwen_1_5_moe_a2_7b_chat"
+        OUTPUT_DIR="Sparsity_eval/${RESULT_DIR_PREFIX}/qwen_1_5_moe_a2_7b_chat"
         ;;
     *)
         echo "Unknown model_type: ${MODEL_TYPE}"
@@ -117,6 +144,7 @@ run_model_parallel() {
         --output_dir "${OUTPUT_DIR}" \
         --batch_size "${BATCH_SIZE}" \
         "${LIMIT_ARGS[@]}" \
+        "${GATE_ARGS[@]}" \
         --dtype "${DTYPE}" \
         --gpus_per_model ${NUM_GPUS}
 }
@@ -160,6 +188,7 @@ run_data_parallel() {
         --output_dir "${OUTPUT_DIR}" \
         --batch_size "${BATCH_SIZE}" \
         "${LIMIT_ARGS[@]}" \
+        "${GATE_ARGS[@]}" \
         --dtype "${DTYPE}" \
         --gpus_per_model 1
 }
@@ -216,6 +245,7 @@ run_mp_dp() {
         --output_dir "${OUTPUT_DIR}" \
         --batch_size "${BATCH_SIZE}" \
         "${LIMIT_ARGS[@]}" \
+        "${GATE_ARGS[@]}" \
         --dtype "${DTYPE}" \
         --gpus_per_model ${GPUS_PER_MODEL}
 }
@@ -228,6 +258,7 @@ run_experiment() {
     echo "Parallel mode : ${PARALLEL_MODE}"
     echo "GPUs          : ${GPU_IDS} (${NUM_GPUS} total)"
     echo "Model         : ${MODEL_PATH}"
+    echo "Gate adapter  : ${GATE_LABEL}"
     echo "Tasks         : ${TASKS}"
     echo "Limit         : ${LIMIT:-none}"
     echo "Sparsity      : mode=${MODE}, ratio=${SPARSITY_RATIO}"
