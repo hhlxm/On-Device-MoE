@@ -27,7 +27,10 @@ import argparse
 import time
 import warnings
 import json
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+cats_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+repo_root = os.path.dirname(cats_dir)
+sys.path.append(cats_dir)
+sys.path.append(repo_root)
 from experiments.models.sparse_silu.ugly_utils import * 
 
 # from experiments.models.sparse_silu.callbacks import GracefulRegularizationScheduler
@@ -91,6 +94,21 @@ def prepare_sparse_model(
             BaseCausalLM = LlamaForCausalLM
             SparseConfig = SparseLlamaConfig
             SparseCausalLM = SparseLlamaForCausalLM
+        elif model_type == QWEN2MOE:
+            BaseConfig = Qwen2MoeConfig
+            BaseCausalLM = Qwen2MoeForCausalLM
+            SparseConfig = SparseQwen2MoeConfig
+            SparseCausalLM = SparseQwen2MoeForCausalLM
+        elif model_type == OLMOE:
+            BaseConfig = OlmoeConfig
+            BaseCausalLM = OlmoeForCausalLM
+            SparseConfig = SparseOlmoeConfig
+            SparseCausalLM = SparseOlmoeForCausalLM
+        elif model_type == DEEPSEEK_V2:
+            BaseConfig = DeepseekV2Config
+            BaseCausalLM = DeepseekV2ForCausalLM
+            SparseConfig = SparseDeepseekV2Config
+            SparseCausalLM = SparseDeepseekV2ForCausalLM
         else:
             raise ValueError(f"Model type {model_type} is not recognized.")
         
@@ -244,9 +262,7 @@ def train(exp_config, use_wandb: bool = True, use_sweep: bool = False):
     bin_edge_dir = os.path.join(results_dir, "bin_edges")
     os.makedirs(fig_dir, exist_ok=True)
     os.makedirs(bin_edge_dir, exist_ok=True)
-    act_hist_path = os.path.join(
-        exp_config.results_dir, folder_name, exp_config.model_name, f"{dataset_type}_activation_histogram.pt"
-    )
+    act_hist_path = os.path.join(results_dir, f"{dataset_type}_activation_histogram.pt")
 
     # If not using sparse Mistral model, all flags related to sparse model should be set as zero or false.
     if not exp_config.use_sparse_model:
@@ -372,6 +388,8 @@ def train(exp_config, use_wandb: bool = True, use_sweep: bool = False):
             set_sparse_threshold(base_model, 0, True)
         else:
             set_sparse_threshold(base_model, exp_config.targeted_sparsity)
+            valid_threshold_count = require_valid_sparse_thresholds(base_model)
+            ds_print(f"Validated sparse thresholds: {valid_threshold_count}")
 
         
     if not use_graceful_regularization and exp_config.print_sparsity and not exp_config.set_sparsity_aware_threshold:
@@ -457,16 +475,22 @@ def train(exp_config, use_wandb: bool = True, use_sweep: bool = False):
     if exp_config.model_save:
         # Save thresholds
         if exp_config.use_sparse_model:
-            if "mixtral" in exp_config.model_name.lower():
-                thresholds = []
-                for layer_idx, layer in enumerate(model.model.layers):
-                    expert_thresholds = []
-                    for expert_idx, expert in enumerate(layer.block_sparse_moe.experts):
-                        threshold = float(expert.dead_threshold)
-                        expert_thresholds.append(threshold)
-                    thresholds.append(expert_thresholds)
-            else:
-                thresholds = [float(m.mlp.dead_threshold) for m in model.model.layers]
+            thresholds = []
+            for layer in model.model.layers:
+                if hasattr(layer, "block_sparse_moe"):
+                    thresholds.append([float(expert.dead_threshold) for expert in layer.block_sparse_moe.experts])
+                    continue
+
+                mlp = layer.mlp
+                if hasattr(mlp, "experts"):
+                    layer_thresholds = [float(expert.dead_threshold) for expert in mlp.experts if expert is not None]
+                    if hasattr(mlp, "shared_expert"):
+                        layer_thresholds.append(float(mlp.shared_expert.dead_threshold))
+                    if hasattr(mlp, "shared_experts") and mlp.shared_experts is not None:
+                        layer_thresholds.append(float(mlp.shared_experts.dead_threshold))
+                    thresholds.append(layer_thresholds)
+                else:
+                    thresholds.append(float(mlp.dead_threshold))
             model.config.thresholds = thresholds
         if exp_config.use_relu:
             no_adapter_checkpoint_dir = checkpoint_dir + f"_no_adapter"

@@ -280,7 +280,8 @@ def parse_args():
         default=False,
         help="Whether to plot activation sparsity after training",
     )
-    parser.add_argument("--use_lora", action=BooleanOptionalAction)
+    parser.add_argument("--use_lora", dest="use_lora", action="store_true")
+    parser.add_argument("--no-use_lora", "--no_use_lora", dest="use_lora", action="store_false")
     parser.set_defaults(use_lora=True)
 
     return parser.parse_args()

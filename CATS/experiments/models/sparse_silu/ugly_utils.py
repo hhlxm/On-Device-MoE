@@ -19,7 +19,17 @@ import os
 import copy
 from transformers import Trainer
 from typing import Any, Dict, Union
-from trl import SFTTrainer
+try:
+    from trl import SFTTrainer
+except Exception as exc:
+    SFTTRAINER_IMPORT_ERROR = exc
+
+    class SFTTrainer(Trainer):
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError(
+                "SFTTrainer is unavailable because trl failed to import. "
+                "Install compatible trl/transformers versions to use SparseSFTTTrainer."
+            ) from SFTTRAINER_IMPORT_ERROR
 
 import torch
 import torch.nn as nn
@@ -71,36 +81,175 @@ from transformers.models.mixtral.modeling_mixtral import(
 
 )
 
+from models_adapter.qwen_1_5_moe_a2_7b.modeling_qwen2_moe_ori import (
+    Qwen2MoeMLP,
+    Qwen2MoeSparseMoeBlock,
+    Qwen2MoeDecoderLayer,
+    Qwen2MoeForCausalLM,
+    Qwen2MoeModel,
+)
+from models_adapter.qwen_1_5_moe_a2_7b.configuration_qwen2_moe import Qwen2MoeConfig
+
+from models_adapter.olmoe_1b_7b_0125_instruct.modeling_olmoe_ori import (
+    OlmoeMLP,
+    OlmoeSparseMoeBlock,
+    OlmoeForCausalLM,
+    OlmoeModel,
+)
+from models_adapter.olmoe_1b_7b_0125_instruct.configuration_olmoe import OlmoeConfig
+
+from models_adapter.deepseek_v2_lite.modeling_deepseek_ori import (
+    DeepseekV2MLP,
+    DeepseekV2MoE,
+    DeepseekV2ForCausalLM,
+    DeepseekV2Model,
+    MoEGate,
+)
+from models_adapter.deepseek_v2_lite.configuration_deepseek import DeepseekV2Config
+
 from tqdm import tqdm
+
+QWEN2MOE = "qwen2_moe"
+OLMOE = "olmoe"
+DEEPSEEK_V2 = "deepseek_v2"
+
+
+def _get_model_type(model):
+    try:
+        return get_model_type(model)
+    except ValueError:
+        model_name = model.__class__.__name__.lower()
+        config_type = getattr(getattr(model, "config", None), "model_type", "").lower()
+        if "qwen2moe" in model_name or QWEN2MOE in config_type or "qwen2moe" in config_type:
+            return QWEN2MOE
+        if OLMOE in model_name or OLMOE in config_type:
+            return OLMOE
+        if "deepseek" in model_name or "deepseek" in config_type:
+            return DEEPSEEK_V2
+        raise
 
 
 def get_mlp_class(model):
-    model_type = get_model_type(model)
+    model_type = _get_model_type(model)
     if model_type == MISTRAL:
         return MistralSparseSiluMLP
     elif model_type == LLAMA:
         return LlamaSparseSiluMLP
     elif model_type == MIXTRAL:
         return SparseMixtralSparseMoeBlock
+    elif model_type == QWEN2MOE:
+        return Qwen2MoeSparseSiluMLP
+    elif model_type == OLMOE:
+        return OlmoeSparseSiluMLP
+    elif model_type == DEEPSEEK_V2:
+        return DeepseekV2SparseSiluMLP
 
 def get_decoder_class(model):
-    model_type = get_model_type(model)
+    model_type = _get_model_type(model)
     if model_type == MIXTRAL:
         return SparseMixtralDecoderLayer
     if model_type == MISTRAL:
         return SparseMistralDecoderLayer
     if model_type == LLAMA:
         return LlamaSparseDecoderLayer
+    if model_type == QWEN2MOE:
+        return None
+    if model_type in (OLMOE, DEEPSEEK_V2):
+        return None
 
 
 def get_model_class(model):
-    model_type = get_model_type(model)
+    model_type = _get_model_type(model)
     if model_type == MIXTRAL:
         return MixtralModel
     if model_type == LLAMA:
         return LlamaModel
     if model_type == MISTRAL:
         return MistralModel
+    if model_type == QWEN2MOE:
+        return Qwen2MoeModel
+    if model_type == OLMOE:
+        return OlmoeModel
+    if model_type == DEEPSEEK_V2:
+        return DeepseekV2Model
+
+
+def _copy_sparse_silu_mlp_weights(new_mlp, original_mlp):
+    new_mlp.gate_proj = original_mlp.gate_proj
+    new_mlp.up_proj = original_mlp.up_proj
+    new_mlp.down_proj = original_mlp.down_proj
+
+
+def _is_moe_sparse_silu_mlp_class(SparseMLP):
+    return SparseMLP in (Qwen2MoeSparseSiluMLP, OlmoeSparseSiluMLP, DeepseekV2SparseSiluMLP)
+
+
+def _iter_sparse_moe_mlps(model):
+    for layer_idx, layer in enumerate(model.model.layers):
+        mlp = layer.mlp
+        if isinstance(mlp, SparseQwen2MoeSparseMoeBlock):
+            for expert_idx, expert in enumerate(mlp.experts):
+                yield layer_idx, expert_idx, expert
+            yield layer_idx, "shared", mlp.shared_expert
+        elif isinstance(mlp, SparseOlmoeSparseMoeBlock):
+            for expert_idx, expert in enumerate(mlp.experts):
+                yield layer_idx, expert_idx, expert
+        elif isinstance(mlp, SparseDeepseekV2MoE):
+            for expert_idx, expert in enumerate(mlp.experts):
+                if expert is not None:
+                    yield layer_idx, expert_idx, expert
+            if getattr(mlp, "shared_experts", None) is not None:
+                yield layer_idx, "shared", mlp.shared_experts
+        elif isinstance(mlp, Qwen2MoeSparseSiluMLP):
+            yield layer_idx, None, mlp
+        elif isinstance(mlp, OlmoeSparseSiluMLP):
+            yield layer_idx, None, mlp
+        elif isinstance(mlp, DeepseekV2SparseSiluMLP):
+            yield layer_idx, None, mlp
+
+
+def _moe_layer_sparse_mlps(layer):
+    mlp = layer.mlp
+    if isinstance(mlp, SparseQwen2MoeSparseMoeBlock):
+        return list(mlp.experts) + [mlp.shared_expert]
+    if isinstance(mlp, SparseOlmoeSparseMoeBlock):
+        return list(mlp.experts)
+    if isinstance(mlp, SparseDeepseekV2MoE):
+        sparse_mlps = [expert for expert in mlp.experts if expert is not None]
+        if getattr(mlp, "shared_experts", None) is not None:
+            sparse_mlps.append(mlp.shared_experts)
+        return sparse_mlps
+    if isinstance(mlp, Qwen2MoeSparseSiluMLP):
+        return [mlp]
+    if isinstance(mlp, OlmoeSparseSiluMLP):
+        return [mlp]
+    if isinstance(mlp, DeepseekV2SparseSiluMLP):
+        return [mlp]
+    return []
+
+
+def _moe_layer_sparse_mlp_items(layer):
+    mlp = layer.mlp
+    if isinstance(mlp, SparseQwen2MoeSparseMoeBlock):
+        return list(enumerate(mlp.experts)) + [("shared", mlp.shared_expert)]
+    if isinstance(mlp, SparseOlmoeSparseMoeBlock):
+        return list(enumerate(mlp.experts))
+    if isinstance(mlp, SparseDeepseekV2MoE):
+        items = [(expert_idx, expert) for expert_idx, expert in enumerate(mlp.experts) if expert is not None]
+        if getattr(mlp, "shared_experts", None) is not None:
+            items.append(("shared", mlp.shared_experts))
+        return items
+    if isinstance(mlp, (Qwen2MoeSparseSiluMLP, OlmoeSparseSiluMLP, DeepseekV2SparseSiluMLP)):
+        return [(None, mlp)]
+    return []
+
+
+def _format_moe_sparse_name(layer_idx, expert_idx):
+    if expert_idx is None:
+        return f"layer {layer_idx}"
+    if expert_idx == "shared":
+        return f"layer {layer_idx} shared expert"
+    return f"layer {layer_idx} expert {expert_idx}"
 
 
 class SparseSiLU(nn.SiLU):
@@ -127,12 +276,28 @@ def get_sparse_config(
     use_graceful_regularization=False,
     thresholds=None,
 ):
+    if model_type is None:
+        model_type = getattr(config, "model_type", None)
+    if isinstance(model_type, str):
+        model_type_lower = model_type.lower()
+        if QWEN2MOE in model_type_lower or "qwen2moe" in model_type_lower:
+            model_type = QWEN2MOE
+        elif OLMOE in model_type_lower:
+            model_type = OLMOE
+        elif "deepseek" in model_type_lower:
+            model_type = DEEPSEEK_V2
     if model_type == MISTRAL:
         new_config = SparseMistralConfig()
     elif model_type == LLAMA:
         new_config = SparseLlamaConfig()
     elif model_type == MIXTRAL:
         new_config = SparseMixtralConfig()
+    elif model_type == QWEN2MOE:
+        new_config = SparseQwen2MoeConfig()
+    elif model_type == OLMOE:
+        new_config = SparseOlmoeConfig()
+    elif model_type == DEEPSEEK_V2:
+        new_config = SparseDeepseekV2Config()
     else:
         raise ValueError(f"Model type {model_type} is not recognized.")
     new_config.__dict__.update(config.__dict__)
@@ -175,6 +340,67 @@ def apply_sparse_silu_mlp(
             del original_mlp  # 删除原有的 mlp 模块以释放内存
             torch.cuda.empty_cache()  # 清理缓存以释放内存
             layer.block_sparse_moe = new_mlp
+        elif SparseMLP == Qwen2MoeSparseSiluMLP:
+            original_mlp = layer.mlp
+            original_device = next(original_mlp.parameters()).device
+            if isinstance(original_mlp, (Qwen2MoeSparseMoeBlock, SparseQwen2MoeSparseMoeBlock)):
+                new_mlp = SparseQwen2MoeSparseMoeBlock(
+                    config,
+                    use_sparse_regularization=use_sparse_regularization,
+                ).to(original_device)
+                for idx, expert in enumerate(new_mlp.experts):
+                    _copy_sparse_silu_mlp_weights(expert, original_mlp.experts[idx])
+                _copy_sparse_silu_mlp_weights(new_mlp.shared_expert, original_mlp.shared_expert)
+                new_mlp.gate = original_mlp.gate
+                new_mlp.shared_expert_gate = original_mlp.shared_expert_gate
+            else:
+                new_mlp = Qwen2MoeSparseSiluMLP(
+                    config,
+                    intermediate_size=original_mlp.intermediate_size,
+                    use_sparse_regularization=use_sparse_regularization,
+                ).to(original_device)
+                _copy_sparse_silu_mlp_weights(new_mlp, original_mlp)
+            del original_mlp
+            torch.cuda.empty_cache()
+            layer.mlp = new_mlp
+        elif SparseMLP == OlmoeSparseSiluMLP:
+            original_mlp = layer.mlp
+            original_device = next(original_mlp.parameters()).device
+            new_mlp = SparseOlmoeSparseMoeBlock(
+                config,
+                use_sparse_regularization=use_sparse_regularization,
+            ).to(original_device)
+            for idx, expert in enumerate(new_mlp.experts):
+                _copy_sparse_silu_mlp_weights(expert, original_mlp.experts[idx])
+            new_mlp.gate = original_mlp.gate
+            del original_mlp
+            torch.cuda.empty_cache()
+            layer.mlp = new_mlp
+        elif SparseMLP == DeepseekV2SparseSiluMLP:
+            original_mlp = layer.mlp
+            original_device = next(original_mlp.parameters()).device
+            if isinstance(original_mlp, (DeepseekV2MoE, SparseDeepseekV2MoE)):
+                new_mlp = SparseDeepseekV2MoE(
+                    config,
+                    use_sparse_regularization=use_sparse_regularization,
+                ).to(original_device)
+                for idx, expert in enumerate(new_mlp.experts):
+                    if expert is not None and original_mlp.experts[idx] is not None:
+                        _copy_sparse_silu_mlp_weights(expert, original_mlp.experts[idx])
+                new_mlp.gate = original_mlp.gate
+                if getattr(original_mlp, "shared_experts", None) is not None:
+                    _copy_sparse_silu_mlp_weights(new_mlp.shared_experts, original_mlp.shared_experts)
+            else:
+                new_mlp = DeepseekV2SparseSiluMLP(
+                    config,
+                    hidden_size=original_mlp.hidden_size,
+                    intermediate_size=original_mlp.intermediate_size,
+                    use_sparse_regularization=use_sparse_regularization,
+                ).to(original_device)
+                _copy_sparse_silu_mlp_weights(new_mlp, original_mlp)
+            del original_mlp
+            torch.cuda.empty_cache()
+            layer.mlp = new_mlp
         else:
             original_mlp = layer.mlp
             original_device = next(original_mlp.parameters()).device
@@ -193,11 +419,13 @@ def apply_sparse_decoder_layer(
     config,
     init_svd: bool = True,
 ):
-    Model = get_model_type(model)
+    Model = get_model_class(model)
     SparseMLP = get_mlp_class(model)
     DecoderLayer = get_decoder_class(model)
+    if DecoderLayer is None:
+        raise NotImplementedError(f"Sparse predictor is not implemented for {_get_model_type(model)}.")
 
-    assert isinstance(model.model, Model), "model.model must be a MistralModel."
+    assert isinstance(model.model, Model), f"model.model must be a {Model.__name__}."
     new_layers = []
     for layer_idx, layer in enumerate(model.model.layers):
         if isinstance(layer.mlp, SparseMLP):
@@ -219,6 +447,8 @@ def enable_sparse_predictor(
     model,
 ):
     DecoderLayer = get_decoder_class(model)
+    if DecoderLayer is None:
+        raise NotImplementedError(f"Sparse predictor is not implemented for {_get_model_type(model)}.")
     for layer_idx, layer in enumerate(model.model.layers):
         if isinstance(layer, DecoderLayer):
             layer.use_sparse_predictor = True
@@ -228,6 +458,8 @@ def disable_sparse_predictor(
     model,
 ):
     DecoderLayer = get_decoder_class(model)
+    if DecoderLayer is None:
+        raise NotImplementedError(f"Sparse predictor is not implemented for {_get_model_type(model)}.")
     for layer_idx, layer in enumerate(model.model.layers):
         if isinstance(layer, DecoderLayer):
             layer.use_sparse_predictor = False
@@ -241,6 +473,10 @@ def activate_stats(model, is_collect_histogram: bool = True):
             for expert in layer.block_sparse_moe.experts:
                 expert.activate_stats(is_collect_histogram=is_collect_histogram)
         return 
+    if _is_moe_sparse_silu_mlp_class(SparseMLP):
+        for _, _, sparse_mlp in _iter_sparse_moe_mlps(model):
+            sparse_mlp.activate_stats(is_collect_histogram=is_collect_histogram)
+        return
 
     for layer in model.model.layers:
         if isinstance(layer.mlp, SparseMLP):
@@ -256,6 +492,10 @@ def deactivate_stats(
             for expert in layer.block_sparse_moe.experts:
                 expert.deactivate_stats()
         return 
+    if _is_moe_sparse_silu_mlp_class(SparseMLP):
+        for _, _, sparse_mlp in _iter_sparse_moe_mlps(model):
+            sparse_mlp.deactivate_stats()
+        return
 
     for layer in model.model.layers:
         if isinstance(layer.mlp, SparseMLP):
@@ -269,6 +509,9 @@ def enable_sparse_silu(model):
         if SparseMLP == SparseMixtralSparseMoeBlock:
             for expert in layer.block_sparse_moe.experts:
                 expert.kill_sparse_swish_outputs = True
+        elif _is_moe_sparse_silu_mlp_class(SparseMLP):
+            for sparse_mlp in _moe_layer_sparse_mlps(layer):
+                sparse_mlp.kill_sparse_swish_outputs = True
         elif isinstance(layer.mlp, SparseMLP):
             layer.mlp.kill_sparse_swish_outputs = True
 
@@ -280,6 +523,9 @@ def disable_sparse_silu(model):
         if SparseMLP == SparseMixtralSparseMoeBlock:
             for expert in layer.block_sparse_moe.experts:
                 expert.kill_sparse_swish_outputs = False
+        elif _is_moe_sparse_silu_mlp_class(SparseMLP):
+            for sparse_mlp in _moe_layer_sparse_mlps(layer):
+                sparse_mlp.kill_sparse_swish_outputs = False
         else:
             layer.mlp.kill_sparse_swish_outputs = False
 
@@ -295,25 +541,67 @@ def print_dead_neuron_stats(model):
             sum_dead_percentage = 0
             for expert_idx, expert in enumerate(layer.block_sparse_moe.experts):
                 dead_percentage = expert.dead_percentage * 100
+                dead_percentage_cpu = dead_percentage.to("cpu") if hasattr(dead_percentage, "to") else torch.tensor(dead_percentage)
+                if expert.visit_counts == 0:
+                    raise RuntimeError(f"layer {i} expert {expert_idx} was not visited while printing sparsity.")
+                if not torch.isfinite(dead_percentage_cpu):
+                    raise RuntimeError(f"layer {i} expert {expert_idx} has non-finite sparsity: {dead_percentage}.")
                 sum_dead_percentage += dead_percentage
                 agg_sparsity = expert.agg_sparsity * 100
                 ds_print(f"layer {i} expert {expert_idx} sparsity: {dead_percentage:.3f}%")
                 ds_print(f"layer {i} expert {expert_idx} agg sparsity: {agg_sparsity:.3f}%")
-                total_sparsity += dead_percentage.to("cpu")
+                total_sparsity += dead_percentage_cpu
                 counts += 1
             sparsity_list.append(float(sum_dead_percentage / len(layer.block_sparse_moe.experts)))
         ds_print(f"Total sparsity: {total_sparsity/counts: .3f}%")
         return float(total_sparsity / counts), sparsity_list
 
+    if _is_moe_sparse_silu_mlp_class(SparseMLP):
+        for i, layer in enumerate(model.model.layers):
+            layer_sparse_mlps = _moe_layer_sparse_mlps(layer)
+            if not layer_sparse_mlps:
+                continue
+            layer_sparsity = 0
+            layer_counts = 0
+            for expert_idx, sparse_mlp in _moe_layer_sparse_mlp_items(layer):
+                if sparse_mlp.visit_counts == 0:
+                    raise RuntimeError(
+                        f"{_format_moe_sparse_name(i, expert_idx)} was not visited while printing sparsity."
+                    )
+                dead_percentage = sparse_mlp.dead_percentage * 100
+                agg_sparsity = sparse_mlp.agg_sparsity * 100
+                dead_percentage_cpu = dead_percentage.to("cpu") if hasattr(dead_percentage, "to") else torch.tensor(dead_percentage)
+                if not torch.isfinite(dead_percentage_cpu):
+                    raise RuntimeError(
+                        f"{_format_moe_sparse_name(i, expert_idx)} has non-finite sparsity: {dead_percentage}."
+                    )
+                ds_print(f"{_format_moe_sparse_name(i, expert_idx)} sparsity: {dead_percentage:.3f}%")
+                ds_print(f"{_format_moe_sparse_name(i, expert_idx)} agg sparsity: {agg_sparsity:.3f}%")
+                total_sparsity += dead_percentage_cpu
+                layer_sparsity += dead_percentage_cpu
+                counts += 1
+                layer_counts += 1
+            if layer_counts > 0:
+                sparsity_list.append(float(layer_sparsity / layer_counts))
+        if counts == 0:
+            ds_print("Total sparsity: skipped (no visited sparse MLPs)")
+            return 0, sparsity_list
+        ds_print(f"Total sparsity: {total_sparsity/counts: .3f}%")
+        return float(total_sparsity / counts), sparsity_list
 
     for i, layer in enumerate(model.model.layers):
         if isinstance(layer.mlp, SparseMLP):
             dead_percentage = layer.mlp.dead_percentage * 100
+            dead_percentage_cpu = dead_percentage.to("cpu") if hasattr(dead_percentage, "to") else torch.tensor(dead_percentage)
+            if layer.mlp.visit_counts == 0:
+                raise RuntimeError(f"layer {i} was not visited while printing sparsity.")
+            if not torch.isfinite(dead_percentage_cpu):
+                raise RuntimeError(f"layer {i} has non-finite sparsity: {dead_percentage}.")
             sparsity_list.append(float(dead_percentage))
             agg_sparsity = layer.mlp.agg_sparsity * 100
             ds_print(f"layer {i} sparsity: {dead_percentage:.3f}%")
             ds_print(f"layer {i} agg sparsity: {agg_sparsity:.3f}%")
-            total_sparsity += dead_percentage.to("cpu")
+            total_sparsity += dead_percentage_cpu
             counts += 1
 
     ds_print(f"Total sparsity: {total_sparsity/counts: .3f}%")
@@ -322,6 +610,8 @@ def print_dead_neuron_stats(model):
 
 def get_sparse_layers(model):
     SparseMLP = get_mlp_class(model)
+    if _is_moe_sparse_silu_mlp_class(SparseMLP):
+        return [sparse_mlp for _, _, sparse_mlp in _iter_sparse_moe_mlps(model)]
     sparse_layers = [m.mlp for m in model.layers() if isinstance(m.mlp, SparseMLP)]
     return sparse_layers
 
@@ -332,10 +622,67 @@ def get_threshold(
     assert (
         len(bin_edges.shape) == len(histogram_counts.shape) == 1
     ), "bin_edges and histogram are expected to be 1-dimensional."
-    histogram_counts /= histogram_counts.sum()
+    histogram_counts = histogram_counts.float()
+    total_count = histogram_counts.sum()
+    if total_count <= 0 or not torch.isfinite(total_count):
+        return torch.tensor(0, dtype=bin_edges.dtype, device=bin_edges.device)
+    histogram_counts = histogram_counts / total_count
     threshold_idx = torch.searchsorted(histogram_counts.cumsum(0), sparsity_level, side="right")
+    threshold_idx = torch.clamp(threshold_idx, max=bin_edges.numel() - 1)
 
-    return bin_edges[threshold_idx]
+    threshold = bin_edges[threshold_idx]
+    if not torch.isfinite(threshold):
+        finite_bins = bin_edges[torch.isfinite(bin_edges)]
+        if finite_bins.numel() == 0:
+            return torch.tensor(0, dtype=bin_edges.dtype, device=bin_edges.device)
+        return finite_bins[-1] if threshold > 0 else finite_bins[0]
+    return threshold
+
+
+def _require_valid_sparse_stats(sparse_mlp, name: str):
+    hist_count = sparse_mlp.post_act_hist_counts.sum()
+    if sparse_mlp.visit_counts == 0 or hist_count <= 0 or not torch.isfinite(hist_count):
+        raise RuntimeError(
+            f"{name} did not collect activation statistics, so its sparse threshold cannot be set. "
+            "Increase the statistics sample count or use data that routes tokens to every expert."
+        )
+
+
+def _require_valid_sparse_threshold(sparse_mlp, name: str):
+    threshold = getattr(sparse_mlp, "dead_threshold", None)
+    if threshold is None:
+        raise RuntimeError(f"{name} does not have a sparse threshold.")
+    threshold_tensor = threshold if torch.is_tensor(threshold) else torch.tensor(threshold)
+    if threshold_tensor.numel() == 0 or not torch.isfinite(threshold_tensor).all():
+        raise RuntimeError(f"{name} has an invalid sparse threshold: {threshold}.")
+
+
+def require_valid_sparse_thresholds(model):
+    SparseMLP = get_mlp_class(model)
+    counts = 0
+
+    if SparseMLP == SparseMixtralSparseMoeBlock:
+        for i, layer in enumerate(model.model.layers):
+            for expert_idx, expert in enumerate(layer.block_sparse_moe.experts):
+                _require_valid_sparse_stats(expert, f"layer {i} expert {expert_idx}")
+                _require_valid_sparse_threshold(expert, f"layer {i} expert {expert_idx}")
+                counts += 1
+    elif _is_moe_sparse_silu_mlp_class(SparseMLP):
+        for layer_idx, expert_idx, sparse_mlp in _iter_sparse_moe_mlps(model):
+            name = _format_moe_sparse_name(layer_idx, expert_idx)
+            _require_valid_sparse_stats(sparse_mlp, name)
+            _require_valid_sparse_threshold(sparse_mlp, name)
+            counts += 1
+    else:
+        for i, layer in enumerate(model.model.layers):
+            if isinstance(layer.mlp, SparseMLP):
+                _require_valid_sparse_stats(layer.mlp, f"layer {i}")
+                _require_valid_sparse_threshold(layer.mlp, f"layer {i}")
+                counts += 1
+
+    if counts == 0:
+        raise RuntimeError("No sparse MLPs were found while validating sparse thresholds.")
+    return counts
 
 
 def set_regularization_threshold(model, threshold: float = 0.1):
@@ -347,6 +694,11 @@ def set_regularization_threshold(model, threshold: float = 0.1):
                 if expert.is_stats:
                     expert.regularization_threshold = threshold
         return 
+    if _is_moe_sparse_silu_mlp_class(SparseMLP):
+        for _, _, sparse_mlp in _iter_sparse_moe_mlps(model):
+            if sparse_mlp.is_stats:
+                sparse_mlp.regularization_threshold = threshold
+        return
 
     for i, layer in enumerate(model.model.layers):
         if (
@@ -360,12 +712,13 @@ def set_sparse_threshold(model, sparsity_level: float, use_relu: bool = False):
 
     if SparseMLP == SparseMixtralSparseMoeBlock:
         for i, layer in enumerate(model.model.layers):
-            for expert in layer.block_sparse_moe.experts:
+            for expert_idx, expert in enumerate(layer.block_sparse_moe.experts):
                 if expert.is_stats:
                     if use_relu:
                         expert.sparse_act_fn = nn.ReLU()
                         expert.use_relu = True
                     else:
+                        _require_valid_sparse_stats(expert, f"layer {i} expert {expert_idx}")
                         #expert本身设置th
                         expert.dead_threshold = get_threshold(
                             expert.histogram_bins,
@@ -376,6 +729,25 @@ def set_sparse_threshold(model, sparsity_level: float, use_relu: bool = False):
                         expert.sparse_act_fn.set_new_threshold(expert.dead_threshold)
                         expert.regularization_threshold = expert.dead_threshold * 1.2
         return 
+    if _is_moe_sparse_silu_mlp_class(SparseMLP):
+        for layer_idx, expert_idx, sparse_mlp in _iter_sparse_moe_mlps(model):
+            if sparse_mlp.is_stats:
+                if use_relu:
+                    sparse_mlp.sparse_act_fn = nn.ReLU()
+                    sparse_mlp.use_relu = True
+                else:
+                    _require_valid_sparse_stats(
+                        sparse_mlp,
+                        _format_moe_sparse_name(layer_idx, expert_idx),
+                    )
+                    sparse_mlp.dead_threshold = get_threshold(
+                        sparse_mlp.histogram_bins,
+                        sparse_mlp.post_act_hist_counts,
+                        sparsity_level,
+                    )
+                    sparse_mlp.sparse_act_fn.set_new_threshold(sparse_mlp.dead_threshold)
+                    sparse_mlp.regularization_threshold = sparse_mlp.dead_threshold * 1.2
+        return
 
     for i, layer in enumerate(model.model.layers):
         if (
@@ -385,6 +757,7 @@ def set_sparse_threshold(model, sparsity_level: float, use_relu: bool = False):
                 layer.mlp.sparse_act_fn = nn.ReLU()
                 layer.mlp.use_relu = True
             else:
+                _require_valid_sparse_stats(layer.mlp, f"layer {i}")
                 layer.mlp.dead_threshold = get_threshold(
                     layer.mlp.histogram_bins,
                     layer.mlp.post_act_hist_counts,
@@ -489,6 +862,21 @@ def plot_activation_histogram(model, fig_dir: str, activation_histogram_dir: str
                         expert_index=expert_idx,
                     )
         return
+    if _is_moe_sparse_silu_mlp_class(SparseMLP):
+        for i, expert_idx, sparse_mlp in _iter_sparse_moe_mlps(model):
+            if sparse_mlp.is_stats:
+                plot_title = f"{_format_moe_sparse_name(i, expert_idx).title()} Post-Activation Absolute Distribution"
+                plot_histogram(
+                    sparse_mlp.histogram_bins,
+                    sparse_mlp.post_act_hist_counts,
+                    sparse_mlp.dead_threshold,
+                    plot_title,
+                    fig_dir,
+                    activation_histogram_dir,
+                    layer_index=i,
+                    expert_index=expert_idx,
+                )
+        return
 
     for i, layer in enumerate(model.model.layers):
         if isinstance(layer.mlp, SparseMLP) and layer.mlp.is_stats:
@@ -524,6 +912,17 @@ def save_act_hist(model, filename="/scr/jay/models/mistral/pre_finetune/cola_act
         torch.save(act_dict, filename)
         return
 
+    if _is_moe_sparse_silu_mlp_class(SparseMLP):
+        for i, expert_idx, sparse_mlp in _iter_sparse_moe_mlps(model):
+            if sparse_mlp.is_stats:
+                act_dict.setdefault(i, {})[expert_idx] = (
+                    sparse_mlp.histogram_bins,
+                    sparse_mlp.pre_act_hist_counts,
+                    sparse_mlp.post_act_hist_counts,
+                )
+        print("Saving activation histograms...\n\n\n")
+        torch.save(act_dict, filename)
+        return
 
     for i, layer in enumerate(model.model.layers):
         if (
@@ -557,6 +956,16 @@ def load_act_hist(model, filename="/scr/jay/models/mistral/pre_finetune/cola_act
                         expert.pre_act_hist_counts,
                         expert.post_act_hist_counts,
                     ) = act_dict[i][expert_idx]
+        return
+
+    if _is_moe_sparse_silu_mlp_class(SparseMLP):
+        for i, expert_idx, sparse_mlp in _iter_sparse_moe_mlps(model):
+            if sparse_mlp.is_stats and i in act_dict and expert_idx in act_dict[i]:
+                (
+                    sparse_mlp.histogram_bins,
+                    sparse_mlp.pre_act_hist_counts,
+                    sparse_mlp.post_act_hist_counts,
+                ) = act_dict[i][expert_idx]
         return
     
                     
@@ -853,7 +1262,7 @@ class SparseMistralDecoderLayer(MistralDecoderLayer):
         # if not self.use_sparse_predictor:
         #     sp_mask = None
 
-        hidden_states = self.mlp(hidden_states, sp_mask)
+        hidden_states = self.mlp(hidden_states, sp_mask) 
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -1286,6 +1695,668 @@ class LlamaSparseDecoderLayer(LlamaDecoderLayer):
             outputs += (present_key_value,)
 
         return outputs
+
+
+# Qwen2-MoE
+
+
+class Qwen2MoeSparseSiluMLP(Qwen2MoeMLP):
+    def __init__(self, config, intermediate_size=None, *args, **kwargs):
+        if intermediate_size is None:
+            intermediate_size = config.intermediate_size
+        super().__init__(config, intermediate_size=intermediate_size)
+        self.swish_outputs = None
+        self.relu = nn.ReLU()
+        self.is_profile = False
+
+        self.kill_sparse_swish_outputs = False
+        self.dead_percentage = 0
+        self.is_stats = False
+        self.visit_counts = 0
+
+        self.dead_threshold = kwargs.pop("dead_threshold", 0)
+        self.use_sparse_regularization = kwargs.pop("use_sparse_regularization", True)
+        self.regularization_type = kwargs.pop("regularization_type", "L1 regularization")
+        self.regularization_threshold = kwargs.pop("regularization_threshold", 0.5)
+        self.use_relu = kwargs.pop("use_relu", False)
+        self.activation_norm = None
+
+        self.is_collect_histogram = False
+        num_bins = 1000
+        self.histogram_bins = torch.linspace(-1, 1, num_bins - 2)
+        self.histogram_bins = torch.cat([torch.tensor([-torch.inf]), self.histogram_bins, torch.tensor([torch.inf])])
+        self.pre_act_hist_counts = torch.zeros(num_bins - 1)
+        self.abs_post_act_hist_counts = torch.zeros(num_bins - 1)
+        self.post_act_hist_counts = torch.zeros(num_bins - 1)
+        self.t = 0
+        self.count = 0
+        self.agg_sparsity = 0
+
+        self.sparse_act_fn = SparseSiLU(threshold=self.dead_threshold)
+
+    def activate_stats(self, is_collect_histogram: bool = True):
+        self.is_stats = True
+        self.dead_percentage = 0
+        self.visit_counts = 0
+        self.is_collect_histogram = is_collect_histogram
+        self.histogram_counts = torch.zeros(2000)
+
+    def deactivate_stats(self):
+        self.is_stats = False
+
+    def collect_stats(self, pre_activation, post_activation):
+        start_time = time.time()
+        pre_activation = pre_activation.float().cpu().detach()
+        post_activation = post_activation.float().cpu().detach()
+        self.pre_act_hist_counts += torch.histogram(pre_activation, bins=self.histogram_bins)[0]
+        self.post_act_hist_counts += torch.histogram(torch.abs(post_activation), bins=self.histogram_bins)[0]
+        self.t += time.time() - start_time
+
+    def forward(self, x, sp_mask: torch.tensor = None):
+        if x.shape[0] == 0:
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+        if sp_mask is not None:
+            return self.down_proj(self.sparse_act_fn(self.gate_proj(x) * sp_mask) * self.up_proj(x))
+
+        if self.is_profile:
+            post_act = self.act_fn(self.gate_proj(x))
+            dead_neurons = post_act.abs() <= self.dead_threshold
+            post_act[dead_neurons] = 0
+            return self.down_proj(post_act * self.up_proj(x))
+
+        if self.use_relu:
+            post_act = self.relu(self.gate_proj(x))
+            self.count += 1
+
+            if self.is_stats:
+                dead_neurons = post_act == 0
+                dead_percentage = dead_neurons.float().mean()
+                agg_sparsity = dead_neurons.all(dim=0).float().mean()
+                self.dead_percentage = (self.dead_percentage * self.visit_counts + dead_percentage) / (
+                    self.visit_counts + 1
+                )
+                self.agg_sparsity = (self.agg_sparsity * self.visit_counts + agg_sparsity) / (
+                    self.visit_counts + 1
+                )
+                self.visit_counts += 1
+
+            return self.down_proj(post_act * self.up_proj(x))
+
+        self.count += 1
+        pre_act = self.gate_proj(x)
+        post_act = self.act_fn(pre_act)
+        if self.kill_sparse_swish_outputs:
+            dead_neurons = post_act.abs() <= self.dead_threshold
+            dead_percentage = dead_neurons.float().mean()
+            agg_sparsity = dead_neurons.all(dim=0).float().mean()
+
+            if self.is_stats:
+                self.dead_percentage = (self.dead_percentage * self.visit_counts + dead_percentage) / (
+                    self.visit_counts + 1
+                )
+                self.agg_sparsity = (self.agg_sparsity * self.visit_counts + agg_sparsity) / (
+                    self.visit_counts + 1
+                )
+                self.visit_counts += 1
+
+                if self.is_collect_histogram and pre_act.eq(0).float().mean() < 0.99:
+                    self.collect_stats(pre_act, post_act)
+
+            post_act[dead_neurons] = 0
+
+        out = self.down_proj(post_act * self.up_proj(x))
+        if self.use_sparse_regularization:
+            if self.regularization_type == "L1 regularization":
+                self.activation_norm = torch.abs(post_act)[torch.abs(post_act) < self.regularization_threshold].mean()
+            elif self.regularization_type == "L2 regularization":
+                self.activation_norm = torch.sqrt(
+                    torch.square(post_act)[torch.abs(post_act) < self.regularization_threshold]
+                ).mean()
+
+        return out
+
+
+class SparseQwen2MoeSparseMoeBlock(Qwen2MoeSparseMoeBlock):
+    def __init__(self, config, *args, **kwargs):
+        nn.Module.__init__(self)
+        self.config = config
+        self.num_experts = config.num_experts
+        self.top_k = config.num_experts_per_tok
+        self.norm_topk_prob = config.norm_topk_prob
+        self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
+        self.experts = nn.ModuleList(
+            [
+                Qwen2MoeSparseSiluMLP(
+                    config,
+                    config.moe_intermediate_size,
+                    *args,
+                    **kwargs,
+                )
+                for _ in range(self.num_experts)
+            ]
+        )
+        self.shared_expert = Qwen2MoeSparseSiluMLP(
+            config,
+            config.shared_expert_intermediate_size,
+            *args,
+            **kwargs,
+        )
+        self.shared_expert_gate = torch.nn.Linear(config.hidden_size, 1, bias=False)
+        self.distill_loss = None
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+        router_logits = self.gate(hidden_states)
+
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+        if self.norm_topk_prob:
+            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        routing_weights = routing_weights.to(hidden_states.dtype)
+
+        final_hidden_states = torch.zeros(
+            (batch_size * sequence_length, hidden_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
+
+        for expert_idx in range(self.num_experts):
+            expert_layer = self.experts[expert_idx]
+            idx, top_x = torch.where(expert_mask[expert_idx])
+            if top_x.shape[0] == 0:
+                continue
+
+            current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
+            current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
+            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
+
+        shared_expert_output = self.shared_expert(hidden_states)
+        shared_expert_output = F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_expert_output
+        final_hidden_states = final_hidden_states + shared_expert_output
+
+        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+        return final_hidden_states, router_logits
+
+
+class SparseQwen2MoeConfig(Qwen2MoeConfig):
+    model_type = "sparse_qwen2_moe"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+
+class SparseQwen2MoeForCausalLM(Qwen2MoeForCausalLM):
+    config_class = SparseQwen2MoeConfig
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.config = config
+        if config.use_sparse_model:
+            self.apply_sparse_mlp()
+            if config.thresholds is not None:
+                self.apply_sparse_thresholds(config.thresholds)
+        if config.use_sparse_predictor:
+            raise NotImplementedError("Sparse predictor is not implemented for Qwen2-MoE.")
+
+    def apply_sparse_mlp(self):
+        apply_sparse_silu_mlp(
+            self,
+            config=self.config,
+            use_sparse_regularization=self.config.use_sparse_regularization,
+        )
+
+    def apply_sparse_thresholds(self, thresholds):
+        for layer_idx, layer in enumerate(self.model.layers):
+            if layer_idx >= len(thresholds):
+                break
+            layer_thresholds = thresholds[layer_idx]
+            if isinstance(layer.mlp, SparseQwen2MoeSparseMoeBlock):
+                for expert_idx, expert in enumerate(layer.mlp.experts):
+                    threshold = layer_thresholds[expert_idx]
+                    expert.dead_threshold = threshold
+                    expert.sparse_act_fn.set_new_threshold(threshold)
+                    expert.kill_sparse_swish_outputs = True
+                    expert.use_relu = getattr(self.config, "use_relu", False)
+                if isinstance(layer_thresholds, (list, tuple)) and len(layer_thresholds) > len(layer.mlp.experts):
+                    threshold = layer_thresholds[-1]
+                    layer.mlp.shared_expert.dead_threshold = threshold
+                    layer.mlp.shared_expert.sparse_act_fn.set_new_threshold(threshold)
+                    layer.mlp.shared_expert.kill_sparse_swish_outputs = True
+                    layer.mlp.shared_expert.use_relu = getattr(self.config, "use_relu", False)
+            elif isinstance(layer.mlp, Qwen2MoeSparseSiluMLP):
+                layer.mlp.dead_threshold = layer_thresholds
+                layer.mlp.sparse_act_fn.set_new_threshold(layer_thresholds)
+                layer.mlp.kill_sparse_swish_outputs = True
+                layer.mlp.use_relu = getattr(self.config, "use_relu", False)
+
+
+# OlmoE
+
+
+class OlmoeSparseSiluMLP(OlmoeMLP):
+    def __init__(self, config, *args, **kwargs):
+        super().__init__(config)
+        self.swish_outputs = None
+        self.relu = nn.ReLU()
+        self.is_profile = False
+
+        self.kill_sparse_swish_outputs = False
+        self.dead_percentage = 0
+        self.is_stats = False
+        self.visit_counts = 0
+
+        self.dead_threshold = kwargs.pop("dead_threshold", 0)
+        self.use_sparse_regularization = kwargs.pop("use_sparse_regularization", True)
+        self.regularization_type = kwargs.pop("regularization_type", "L1 regularization")
+        self.regularization_threshold = kwargs.pop("regularization_threshold", 0.5)
+        self.use_relu = kwargs.pop("use_relu", False)
+        self.activation_norm = None
+
+        self.is_collect_histogram = False
+        num_bins = 1000
+        self.histogram_bins = torch.linspace(-1, 1, num_bins - 2)
+        self.histogram_bins = torch.cat([torch.tensor([-torch.inf]), self.histogram_bins, torch.tensor([torch.inf])])
+        self.pre_act_hist_counts = torch.zeros(num_bins - 1)
+        self.abs_post_act_hist_counts = torch.zeros(num_bins - 1)
+        self.post_act_hist_counts = torch.zeros(num_bins - 1)
+        self.t = 0
+        self.count = 0
+        self.agg_sparsity = 0
+
+        self.sparse_act_fn = SparseSiLU(threshold=self.dead_threshold)
+
+    def activate_stats(self, is_collect_histogram: bool = True):
+        self.is_stats = True
+        self.dead_percentage = 0
+        self.visit_counts = 0
+        self.is_collect_histogram = is_collect_histogram
+        self.histogram_counts = torch.zeros(2000)
+
+    def deactivate_stats(self):
+        self.is_stats = False
+
+    def collect_stats(self, pre_activation, post_activation):
+        start_time = time.time()
+        pre_activation = pre_activation.float().cpu().detach()
+        post_activation = post_activation.float().cpu().detach()
+        self.pre_act_hist_counts += torch.histogram(pre_activation, bins=self.histogram_bins)[0]
+        self.post_act_hist_counts += torch.histogram(torch.abs(post_activation), bins=self.histogram_bins)[0]
+        self.t += time.time() - start_time
+
+    def forward(self, x, sp_mask: torch.tensor = None):
+        if sp_mask is not None:
+            return self.down_proj(self.sparse_act_fn(self.gate_proj(x) * sp_mask) * self.up_proj(x))
+
+        if self.is_profile:
+            post_act = self.act_fn(self.gate_proj(x))
+            dead_neurons = post_act.abs() <= self.dead_threshold
+            post_act[dead_neurons] = 0
+            return self.down_proj(post_act * self.up_proj(x))
+
+        if self.use_relu:
+            post_act = self.relu(self.gate_proj(x))
+            self.count += 1
+
+            if self.is_stats:
+                dead_neurons = post_act == 0
+                dead_percentage = dead_neurons.float().mean()
+                agg_sparsity = dead_neurons.all(dim=0).float().mean()
+                self.dead_percentage = (self.dead_percentage * self.visit_counts + dead_percentage) / (
+                    self.visit_counts + 1
+                )
+                self.agg_sparsity = (self.agg_sparsity * self.visit_counts + agg_sparsity) / (
+                    self.visit_counts + 1
+                )
+                self.visit_counts += 1
+
+            return self.down_proj(post_act * self.up_proj(x))
+
+        self.count += 1
+        pre_act = self.gate_proj(x)
+        post_act = self.act_fn(pre_act)
+        if self.kill_sparse_swish_outputs:
+            dead_neurons = post_act.abs() <= self.dead_threshold
+            dead_percentage = dead_neurons.float().mean()
+            agg_sparsity = dead_neurons.all(dim=0).float().mean()
+
+            if self.is_stats:
+                self.dead_percentage = (self.dead_percentage * self.visit_counts + dead_percentage) / (
+                    self.visit_counts + 1
+                )
+                self.agg_sparsity = (self.agg_sparsity * self.visit_counts + agg_sparsity) / (
+                    self.visit_counts + 1
+                )
+                self.visit_counts += 1
+
+                if self.is_collect_histogram and pre_act.eq(0).float().mean() < 0.99:
+                    self.collect_stats(pre_act, post_act)
+
+            post_act[dead_neurons] = 0
+
+        out = self.down_proj(post_act * self.up_proj(x))
+        if self.use_sparse_regularization:
+            if self.regularization_type == "L1 regularization":
+                self.activation_norm = torch.abs(post_act)[torch.abs(post_act) < self.regularization_threshold].mean()
+            elif self.regularization_type == "L2 regularization":
+                self.activation_norm = torch.sqrt(
+                    torch.square(post_act)[torch.abs(post_act) < self.regularization_threshold]
+                ).mean()
+
+        return out
+
+
+class SparseOlmoeSparseMoeBlock(OlmoeSparseMoeBlock):
+    def __init__(self, config, *args, **kwargs):
+        nn.Module.__init__(self)
+        self.num_experts = config.num_experts
+        self.top_k = config.num_experts_per_tok
+        self.norm_topk_prob = config.norm_topk_prob
+        self.gate = nn.Linear(config.hidden_size, self.num_experts, bias=False)
+        self.experts = nn.ModuleList([OlmoeSparseSiluMLP(config, *args, **kwargs) for _ in range(self.num_experts)])
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+        router_logits = self.gate(hidden_states)
+
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+        if self.norm_topk_prob:
+            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        routing_weights = routing_weights.to(hidden_states.dtype)
+
+        final_hidden_states = torch.zeros(
+            (batch_size * sequence_length, hidden_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
+
+        for expert_idx in range(self.num_experts):
+            expert_layer = self.experts[expert_idx]
+            idx, top_x = torch.where(expert_mask[expert_idx])
+            if top_x.shape[0] == 0:
+                continue
+
+            current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
+            current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
+            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
+
+        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+        return final_hidden_states, router_logits
+
+
+class SparseOlmoeConfig(OlmoeConfig):
+    model_type = "sparse_olmoe"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+
+class SparseOlmoeForCausalLM(OlmoeForCausalLM):
+    config_class = SparseOlmoeConfig
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.config = config
+        if config.use_sparse_model:
+            self.apply_sparse_mlp()
+            if config.thresholds is not None:
+                self.apply_sparse_thresholds(config.thresholds)
+        if config.use_sparse_predictor:
+            raise NotImplementedError("Sparse predictor is not implemented for OlmoE.")
+
+    def apply_sparse_mlp(self):
+        apply_sparse_silu_mlp(
+            self,
+            config=self.config,
+            use_sparse_regularization=self.config.use_sparse_regularization,
+        )
+
+    def apply_sparse_thresholds(self, thresholds):
+        for layer_idx, layer in enumerate(self.model.layers):
+            if layer_idx >= len(thresholds):
+                break
+            layer_thresholds = thresholds[layer_idx]
+            if isinstance(layer.mlp, SparseOlmoeSparseMoeBlock):
+                for expert_idx, expert in enumerate(layer.mlp.experts):
+                    threshold = layer_thresholds[expert_idx]
+                    expert.dead_threshold = threshold
+                    expert.sparse_act_fn.set_new_threshold(threshold)
+                    expert.kill_sparse_swish_outputs = True
+                    expert.use_relu = getattr(self.config, "use_relu", False)
+
+
+# DeepSeek-V2
+
+
+class DeepseekV2SparseSiluMLP(DeepseekV2MLP):
+    def __init__(self, config, hidden_size=None, intermediate_size=None, *args, **kwargs):
+        super().__init__(config, hidden_size=hidden_size, intermediate_size=intermediate_size)
+        self.swish_outputs = None
+        self.relu = nn.ReLU()
+        self.is_profile = False
+
+        self.kill_sparse_swish_outputs = False
+        self.dead_percentage = 0
+        self.is_stats = False
+        self.visit_counts = 0
+
+        self.dead_threshold = kwargs.pop("dead_threshold", 0)
+        self.use_sparse_regularization = kwargs.pop("use_sparse_regularization", True)
+        self.regularization_type = kwargs.pop("regularization_type", "L1 regularization")
+        self.regularization_threshold = kwargs.pop("regularization_threshold", 0.5)
+        self.use_relu = kwargs.pop("use_relu", False)
+        self.activation_norm = None
+
+        self.is_collect_histogram = False
+        num_bins = 1000
+        self.histogram_bins = torch.linspace(-1, 1, num_bins - 2)
+        self.histogram_bins = torch.cat([torch.tensor([-torch.inf]), self.histogram_bins, torch.tensor([torch.inf])])
+        self.pre_act_hist_counts = torch.zeros(num_bins - 1)
+        self.abs_post_act_hist_counts = torch.zeros(num_bins - 1)
+        self.post_act_hist_counts = torch.zeros(num_bins - 1)
+        self.t = 0
+        self.count = 0
+        self.agg_sparsity = 0
+
+        self.sparse_act_fn = SparseSiLU(threshold=self.dead_threshold)
+
+    def activate_stats(self, is_collect_histogram: bool = True):
+        self.is_stats = True
+        self.dead_percentage = 0
+        self.visit_counts = 0
+        self.is_collect_histogram = is_collect_histogram
+        self.histogram_counts = torch.zeros(2000)
+
+    def deactivate_stats(self):
+        self.is_stats = False
+
+    def collect_stats(self, pre_activation, post_activation):
+        start_time = time.time()
+        pre_activation = pre_activation.float().cpu().detach()
+        post_activation = post_activation.float().cpu().detach()
+        self.pre_act_hist_counts += torch.histogram(pre_activation, bins=self.histogram_bins)[0]
+        self.post_act_hist_counts += torch.histogram(torch.abs(post_activation), bins=self.histogram_bins)[0]
+        self.t += time.time() - start_time
+
+    def forward(self, x, sp_mask: torch.tensor = None):
+        if x.shape[0] == 0:
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+        if sp_mask is not None:
+            return self.down_proj(self.sparse_act_fn(self.gate_proj(x) * sp_mask) * self.up_proj(x))
+
+        if self.is_profile:
+            post_act = self.act_fn(self.gate_proj(x))
+            dead_neurons = post_act.abs() <= self.dead_threshold
+            post_act[dead_neurons] = 0
+            return self.down_proj(post_act * self.up_proj(x))
+
+        if self.use_relu:
+            post_act = self.relu(self.gate_proj(x))
+            self.count += 1
+
+            if self.is_stats:
+                dead_neurons = post_act == 0
+                dead_percentage = dead_neurons.float().mean()
+                agg_sparsity = dead_neurons.all(dim=0).float().mean()
+                self.dead_percentage = (self.dead_percentage * self.visit_counts + dead_percentage) / (
+                    self.visit_counts + 1
+                )
+                self.agg_sparsity = (self.agg_sparsity * self.visit_counts + agg_sparsity) / (
+                    self.visit_counts + 1
+                )
+                self.visit_counts += 1
+
+            return self.down_proj(post_act * self.up_proj(x))
+
+        self.count += 1
+        pre_act = self.gate_proj(x)
+        post_act = self.act_fn(pre_act)
+        if self.kill_sparse_swish_outputs:
+            dead_neurons = post_act.abs() <= self.dead_threshold
+            dead_percentage = dead_neurons.float().mean()
+            agg_sparsity = dead_neurons.all(dim=0).float().mean()
+
+            if self.is_stats:
+                self.dead_percentage = (self.dead_percentage * self.visit_counts + dead_percentage) / (
+                    self.visit_counts + 1
+                )
+                self.agg_sparsity = (self.agg_sparsity * self.visit_counts + agg_sparsity) / (
+                    self.visit_counts + 1
+                )
+                self.visit_counts += 1
+
+                if self.is_collect_histogram and pre_act.eq(0).float().mean() < 0.99:
+                    self.collect_stats(pre_act, post_act)
+
+            post_act[dead_neurons] = 0
+
+        out = self.down_proj(post_act * self.up_proj(x))
+        if self.use_sparse_regularization:
+            if self.regularization_type == "L1 regularization":
+                self.activation_norm = torch.abs(post_act)[torch.abs(post_act) < self.regularization_threshold].mean()
+            elif self.regularization_type == "L2 regularization":
+                self.activation_norm = torch.sqrt(
+                    torch.square(post_act)[torch.abs(post_act) < self.regularization_threshold]
+                ).mean()
+
+        return out
+
+
+class SparseDeepseekV2MoE(DeepseekV2MoE):
+    def __init__(self, config, *args, **kwargs):
+        nn.Module.__init__(self)
+        self.config = config
+        self.num_experts_per_tok = config.num_experts_per_tok
+
+        if hasattr(config, "ep_size") and config.ep_size > 1:
+            assert config.ep_size == torch.distributed.get_world_size()
+            self.ep_size = config.ep_size
+            self.experts_per_rank = config.n_routed_experts // config.ep_size
+            self.ep_rank = torch.distributed.get_rank()
+            self.experts = nn.ModuleList(
+                [
+                    (
+                        DeepseekV2SparseSiluMLP(
+                            config,
+                            None,
+                            config.moe_intermediate_size,
+                            *args,
+                            **kwargs,
+                        )
+                        if i >= self.ep_rank * self.experts_per_rank
+                        and i < (self.ep_rank + 1) * self.experts_per_rank
+                        else None
+                    )
+                    for i in range(config.n_routed_experts)
+                ]
+            )
+        else:
+            self.ep_size = 1
+            self.experts_per_rank = config.n_routed_experts
+            self.ep_rank = 0
+            self.experts = nn.ModuleList(
+                [
+                    DeepseekV2SparseSiluMLP(
+                        config,
+                        None,
+                        config.moe_intermediate_size,
+                        *args,
+                        **kwargs,
+                    )
+                    for _ in range(config.n_routed_experts)
+                ]
+            )
+        self.gate = MoEGate(config)
+        if config.n_shared_experts is not None:
+            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+            self.shared_experts = DeepseekV2SparseSiluMLP(
+                config,
+                None,
+                intermediate_size,
+                *args,
+                **kwargs,
+            )
+
+
+class SparseDeepseekV2Config(DeepseekV2Config):
+    model_type = "sparse_deepseek_v2"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+
+class SparseDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
+    config_class = SparseDeepseekV2Config
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.config = config
+        if config.use_sparse_model:
+            self.apply_sparse_mlp()
+            if config.thresholds is not None:
+                self.apply_sparse_thresholds(config.thresholds)
+        if config.use_sparse_predictor:
+            raise NotImplementedError("Sparse predictor is not implemented for DeepSeek-V2.")
+
+    def apply_sparse_mlp(self):
+        apply_sparse_silu_mlp(
+            self,
+            config=self.config,
+            use_sparse_regularization=self.config.use_sparse_regularization,
+        )
+
+    def apply_sparse_thresholds(self, thresholds):
+        for layer_idx, layer in enumerate(self.model.layers):
+            if layer_idx >= len(thresholds):
+                break
+            layer_thresholds = thresholds[layer_idx]
+            if isinstance(layer.mlp, SparseDeepseekV2MoE):
+                for expert_idx, expert in enumerate(layer.mlp.experts):
+                    if expert is None:
+                        continue
+                    threshold = layer_thresholds[expert_idx]
+                    expert.dead_threshold = threshold
+                    expert.sparse_act_fn.set_new_threshold(threshold)
+                    expert.kill_sparse_swish_outputs = True
+                    expert.use_relu = getattr(self.config, "use_relu", False)
+                if getattr(layer.mlp, "shared_experts", None) is not None and isinstance(layer_thresholds, (list, tuple)):
+                    threshold = layer_thresholds[-1]
+                    layer.mlp.shared_experts.dead_threshold = threshold
+                    layer.mlp.shared_experts.sparse_act_fn.set_new_threshold(threshold)
+                    layer.mlp.shared_experts.kill_sparse_swish_outputs = True
+                    layer.mlp.shared_experts.use_relu = getattr(self.config, "use_relu", False)
+            elif isinstance(layer.mlp, DeepseekV2SparseSiluMLP):
+                layer.mlp.dead_threshold = layer_thresholds
+                layer.mlp.sparse_act_fn.set_new_threshold(layer_thresholds)
+                layer.mlp.kill_sparse_swish_outputs = True
+                layer.mlp.use_relu = getattr(self.config, "use_relu", False)
+
 
 # Mixtral 稀疏MLP
 class MixtralSparseSiluMLP(MixtralBlockSparseTop2MLP):

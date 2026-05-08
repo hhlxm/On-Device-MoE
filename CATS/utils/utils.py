@@ -13,7 +13,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import torch
 
-from utils.constants import MISTRAL, LLAMA, MIXTRAL
+from utils.constants import DEEPSEEK_V2, LLAMA, MISTRAL, MIXTRAL, OLMOE, QWEN2MOE
 
 
 def get_model_type_from_name(model_name: str):
@@ -24,6 +24,14 @@ def get_model_type_from_name(model_name: str):
         return LLAMA
     if MIXTRAL.lower() in model_name:
         return MIXTRAL
+    if "qwen" in model_name and "moe" in model_name:
+        return QWEN2MOE
+    if QWEN2MOE in model_name or "qwen2moe" in model_name:
+        return QWEN2MOE
+    if OLMOE in model_name:
+        return OLMOE
+    if "deepseek" in model_name:
+        return DEEPSEEK_V2
     raise ValueError(f"Model name {model_name} is not recognized.")
 
 
