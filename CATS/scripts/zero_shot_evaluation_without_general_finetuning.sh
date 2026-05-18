@@ -295,7 +295,8 @@ PY
         --model_name "$model_name" \
         --base_model_repo_id "$base_model_repo_id" \
         --process_index "$process_index" \
-        --no-use_lora
+        --no-use_lora \
+        --is_plot
     fi
 
     echo "model directory: ${model_directory}"

@@ -1,4 +1,5 @@
 from typing import Optional, Tuple
+import csv
 import torch
 import torch.nn as nn
 from torch.nn import MSELoss
@@ -252,15 +253,57 @@ def _format_moe_sparse_name(layer_idx, expert_idx):
     return f"layer {layer_idx} expert {expert_idx}"
 
 
+def _threshold_to_float(threshold):
+    if torch.is_tensor(threshold):
+        return float(threshold.detach().cpu().item())
+    return float(threshold)
+
+
+def _collect_post_act_histogram(sparse_mlp, post_activation):
+    start_time = time.time()
+    with torch.no_grad():
+        post_activation = post_activation.detach()
+        if post_activation.numel() == 0:
+            return
+
+        histogram_bins = sparse_mlp.histogram_bins.to(device=post_activation.device, dtype=torch.float32)
+        post_act_hist_counts = sparse_mlp.post_act_hist_counts.to(device=post_activation.device)
+        post_act_hist_counts = post_act_hist_counts.to(dtype=torch.float32)
+
+        post_act_abs = post_activation.float().abs()
+        bin_indices = torch.bucketize(post_act_abs.reshape(-1), histogram_bins, right=True) - 1
+        bin_indices = bin_indices.clamp_(0, histogram_bins.numel() - 2)
+        sparse_mlp.post_act_hist_counts = post_act_hist_counts + torch.bincount(
+            bin_indices,
+            minlength=histogram_bins.numel() - 1,
+        ).to(post_act_hist_counts.dtype)
+        sparse_mlp.histogram_bins = histogram_bins
+
+    sparse_mlp.t += time.time() - start_time
+
+
+def _hist_tensor_for_save(tensor):
+    return tensor.detach().cpu() if torch.is_tensor(tensor) else tensor
+
+
+def _hist_entry_for_save(sparse_mlp):
+    return (
+        _hist_tensor_for_save(sparse_mlp.histogram_bins),
+        _hist_tensor_for_save(sparse_mlp.pre_act_hist_counts),
+        _hist_tensor_for_save(sparse_mlp.post_act_hist_counts),
+        sparse_mlp.visit_counts,
+    )
+
+
 class SparseSiLU(nn.SiLU):
     def __init__(self, threshold):
         super(SparseSiLU, self).__init__()
-        self.threshold = threshold
+        self.threshold = _threshold_to_float(threshold)
         self.m = nn.Threshold(self.threshold, 0)
 
     def set_new_threshold(self, threshold):
-        self.threshold = threshold
-        self.m = nn.Threshold(threshold, 0)
+        self.threshold = _threshold_to_float(threshold)
+        self.m = nn.Threshold(self.threshold, 0)
 
     def forward(self, x):
         act = super(SparseSiLU, self).forward(x)
@@ -842,55 +885,103 @@ def plot_histogram(
     plt.close(fig)
 
 
+def _iter_stat_sparse_mlps(model, SparseMLP):
+    if SparseMixtralSparseMoeBlock == SparseMLP:
+        for layer in model.model.layers:
+            for expert in layer.block_sparse_moe.experts:
+                if expert.is_stats:
+                    yield expert
+        return
+
+    if _is_moe_sparse_silu_mlp_class(SparseMLP):
+        for _, _, sparse_mlp in _iter_sparse_moe_mlps(model):
+            if sparse_mlp.is_stats:
+                yield sparse_mlp
+        return
+
+    for layer in model.model.layers:
+        if isinstance(layer.mlp, SparseMLP) and layer.mlp.is_stats:
+            yield layer.mlp
+
+
 def plot_activation_histogram(model, fig_dir: str, activation_histogram_dir: str):
     SparseMLP = get_mlp_class(model)
+    bin_edges = None
+    combined_counts = None
+    num_histograms = 0
 
-    if SparseMixtralSparseMoeBlock == SparseMLP:
-        for i, layer in enumerate(model.model.layers):
-            for expert_idx, expert in enumerate(layer.block_sparse_moe.experts):
-                if expert.is_stats:
-                    # Can set the threshold only the relevant statistics is collected.
-                    plot_title = f"Layer: {i} Expert: {expert_idx} Post-Activation Absolute Distribution"
-                    plot_histogram(
-                        expert.histogram_bins,
-                        expert.post_act_hist_counts,
-                        expert.dead_threshold,
-                        plot_title,
-                        fig_dir,
-                        activation_histogram_dir,
-                        layer_index=i,
-                        expert_index=expert_idx,
-                    )
+    for sparse_mlp in _iter_stat_sparse_mlps(model, SparseMLP):
+        current_bin_edges = sparse_mlp.histogram_bins.detach().cpu()
+        current_counts = sparse_mlp.post_act_hist_counts.detach().cpu().float()
+
+        if bin_edges is None:
+            bin_edges = current_bin_edges
+            combined_counts = torch.zeros_like(current_counts, dtype=torch.float32)
+        elif not torch.equal(bin_edges, current_bin_edges):
+            raise ValueError("Cannot combine activation histograms with different bin edges.")
+
+        combined_counts += current_counts
+        num_histograms += 1
+
+    if combined_counts is None or combined_counts.sum().item() == 0:
+        ds_print("No activation histogram statistics are available to plot.")
         return
-    if _is_moe_sparse_silu_mlp_class(SparseMLP):
-        for i, expert_idx, sparse_mlp in _iter_sparse_moe_mlps(model):
-            if sparse_mlp.is_stats:
-                plot_title = f"{_format_moe_sparse_name(i, expert_idx).title()} Post-Activation Absolute Distribution"
-                plot_histogram(
-                    sparse_mlp.histogram_bins,
-                    sparse_mlp.post_act_hist_counts,
-                    sparse_mlp.dead_threshold,
-                    plot_title,
-                    fig_dir,
-                    activation_histogram_dir,
-                    layer_index=i,
-                    expert_index=expert_idx,
+
+    os.makedirs(fig_dir, exist_ok=True)
+    os.makedirs(activation_histogram_dir, exist_ok=True)
+
+    total_count = combined_counts.sum()
+    combined_percentages = combined_counts / total_count * 100
+    combined_cdf_percentages = combined_percentages.cumsum(0)
+
+    if is_mainprocess():
+        csv_path = os.path.join(activation_histogram_dir, "combined_histogram.csv")
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["bin_left", "bin_right", "count", "percentage", "cdf_percentage"])
+            for bin_left, bin_right, count, percentage, cdf_percentage in zip(
+                bin_edges[:-1],
+                bin_edges[1:],
+                combined_counts,
+                combined_percentages,
+                combined_cdf_percentages,
+            ):
+                writer.writerow(
+                    [
+                        float(bin_left),
+                        float(bin_right),
+                        float(count),
+                        float(percentage),
+                        float(cdf_percentage),
+                    ]
                 )
+
+    left_edges = bin_edges[:-1]
+    right_edges = bin_edges[1:]
+    finite_abs_mask = (left_edges >= 0) & torch.isfinite(left_edges) & torch.isfinite(right_edges)
+    plot_right_edges = right_edges[finite_abs_mask].numpy()
+    plot_cdf_percentages = combined_cdf_percentages[finite_abs_mask].numpy()
+
+    if len(plot_right_edges) == 0:
+        ds_print("No finite non-negative activation histogram bins are available to plot.")
         return
 
-    for i, layer in enumerate(model.model.layers):
-        if isinstance(layer.mlp, SparseMLP) and layer.mlp.is_stats:
-            # Can set the threshold only the relevant statistics is collected.
-            plot_title = f"Layer: {i} Post-Activation Absolute Distribution"
-            plot_histogram(
-                layer.mlp.histogram_bins,
-                layer.mlp.post_act_hist_counts,
-                layer.mlp.dead_threshold,
-                plot_title,
-                fig_dir,
-                activation_histogram_dir,
-                layer_index=i,
-            )
+    fig, ax = plt.subplots()
+    ax.plot(
+        plot_right_edges,
+        plot_cdf_percentages,
+        color="#227CF6",
+        linewidth=2,
+    )
+    ax.set_xlabel("|X|")
+    ax.set_ylabel("CDF (%)")
+    ax.set_xlim(left=0, right=float(right_edges[finite_abs_mask][-1]))
+    ax.set_ylim(bottom=0, top=100)
+    ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.4)
+    ax.set_title(f"Combined Post-Activation Absolute CDF ({num_histograms} FFN/experts)")
+    fig.tight_layout()
+    plt.savefig(os.path.join(fig_dir, "combined_post_activation_abs_cdf.png"))
+    plt.close(fig)
 
 
 def save_act_hist(model, filename="/scr/jay/models/mistral/pre_finetune/cola_act_hist.pt"):
@@ -903,11 +994,7 @@ def save_act_hist(model, filename="/scr/jay/models/mistral/pre_finetune/cola_act
             act_dict[i] = {}
             for expert_idx, expert in enumerate(layer.block_sparse_moe.experts):
                 if expert.is_stats:
-                    act_dict[i][expert_idx] = (
-                        expert.histogram_bins,
-                        expert.pre_act_hist_counts,
-                        expert.post_act_hist_counts,
-                    )
+                    act_dict[i][expert_idx] = _hist_entry_for_save(expert)
         print("Saving activation histograms...\n\n\n")
         torch.save(act_dict, filename)
         return
@@ -915,11 +1002,7 @@ def save_act_hist(model, filename="/scr/jay/models/mistral/pre_finetune/cola_act
     if _is_moe_sparse_silu_mlp_class(SparseMLP):
         for i, expert_idx, sparse_mlp in _iter_sparse_moe_mlps(model):
             if sparse_mlp.is_stats:
-                act_dict.setdefault(i, {})[expert_idx] = (
-                    sparse_mlp.histogram_bins,
-                    sparse_mlp.pre_act_hist_counts,
-                    sparse_mlp.post_act_hist_counts,
-                )
+                act_dict.setdefault(i, {})[expert_idx] = _hist_entry_for_save(sparse_mlp)
         print("Saving activation histograms...\n\n\n")
         torch.save(act_dict, filename)
         return
@@ -928,11 +1011,7 @@ def save_act_hist(model, filename="/scr/jay/models/mistral/pre_finetune/cola_act
         if (
             isinstance(layer.mlp, SparseMLP) and layer.mlp.is_stats
         ):  # Can set the threshold only the relevant statistics is collected.
-            act_dict[i] = (
-                layer.mlp.histogram_bins,
-                layer.mlp.pre_act_hist_counts,
-                layer.mlp.post_act_hist_counts,
-            )
+            act_dict[i] = _hist_entry_for_save(layer.mlp)
     print("Saving activation histograms...\n\n\n")
     torch.save(act_dict, filename)
 
@@ -947,35 +1026,35 @@ def load_act_hist(model, filename="/scr/jay/models/mistral/pre_finetune/cola_act
 
     act_dict = torch.load(filename)
 
+    def _load_sparse_hist(sparse_mlp, hist_entry):
+        (
+            sparse_mlp.histogram_bins,
+            sparse_mlp.pre_act_hist_counts,
+            sparse_mlp.post_act_hist_counts,
+            *metadata,
+        ) = hist_entry
+        if metadata:
+            sparse_mlp.visit_counts = metadata[0]
+        elif sparse_mlp.post_act_hist_counts.sum() > 0:
+            sparse_mlp.visit_counts = 1
+
     if SparseMLP == SparseMixtralSparseMoeBlock:
         for i, layer in enumerate(model.model.layers):
             for expert_idx, expert in enumerate(layer.block_sparse_moe.experts):
                 if expert.is_stats and expert_idx in act_dict[i]:
-                    (
-                        expert.histogram_bins,
-                        expert.pre_act_hist_counts,
-                        expert.post_act_hist_counts,
-                    ) = act_dict[i][expert_idx]
+                    _load_sparse_hist(expert, act_dict[i][expert_idx])
         return
 
     if _is_moe_sparse_silu_mlp_class(SparseMLP):
         for i, expert_idx, sparse_mlp in _iter_sparse_moe_mlps(model):
             if sparse_mlp.is_stats and i in act_dict and expert_idx in act_dict[i]:
-                (
-                    sparse_mlp.histogram_bins,
-                    sparse_mlp.pre_act_hist_counts,
-                    sparse_mlp.post_act_hist_counts,
-                ) = act_dict[i][expert_idx]
+                _load_sparse_hist(sparse_mlp, act_dict[i][expert_idx])
         return
     
                     
     for i, layer in enumerate(model.model.layers):
         if (isinstance(layer.mlp, SparseMLP) and layer.mlp.is_stats):  # Can set the threshold only the relevant statistics is collected.
-            (
-                layer.mlp.histogram_bins,
-                layer.mlp.pre_act_hist_counts,
-                layer.mlp.post_act_hist_counts,
-            ) = act_dict[i]
+            _load_sparse_hist(layer.mlp, act_dict[i])
 
 
 def enable_last_k_modules(model, start_module_idx: int):
@@ -1056,17 +1135,8 @@ class MistralSparseSiluMLP(MistralMLP):
     def deactivate_stats(self):
         self.is_stats = False
 
-    def collect_stats(self, pre_activation, post_activation):
-        start_time = time.time()
-        pre_activation = pre_activation.float().cpu().detach()
-        post_activation = post_activation.float().cpu().detach()
-        # self.histogram_bins=self.histogram_bins.to(pre_activation.device).type(pre_activation.dtype)
-        self.pre_act_hist_counts += torch.histogram(pre_activation, bins=self.histogram_bins)[0]
-        self.post_act_hist_counts += torch.histogram(torch.abs(post_activation), bins=self.histogram_bins)[0]
-        # self.post_act_hist_counts += torch.histogram(post_activation, bins=self.histogram_bins)[0]
-        self.t += time.time() - start_time
-        # if self.visit_counts % 30 == 0:
-        #     print(f"Time taken to collect stats: {self.t}s.")
+    def collect_stats(self, post_activation):
+        _collect_post_act_histogram(self, post_activation)
 
     def forward(
         self,
@@ -1150,8 +1220,8 @@ class MistralSparseSiluMLP(MistralMLP):
                     self.a = dead_percentage
 
                     # Collect histogram stats
-                    if self.is_collect_histogram and pre_act.eq(0).float().mean() < 0.99:  # Padded dataset
-                        self.collect_stats(pre_act, post_act)
+                    if self.is_collect_histogram:
+                        self.collect_stats(post_act)
 
                 post_act[dead_neurons] = 0
 
@@ -1396,17 +1466,8 @@ class LlamaSparseSiluMLP(LlamaMLP):
     def deactivate_stats(self):
         self.is_stats = False
 
-    def collect_stats(self, pre_activation, post_activation):
-        start_time = time.time()
-        pre_activation = pre_activation.float().cpu().detach()
-        post_activation = post_activation.float().cpu().detach()
-        # self.histogram_bins=self.histogram_bins.to(pre_activation.device).type(pre_activation.dtype)
-        self.pre_act_hist_counts += torch.histogram(pre_activation, bins=self.histogram_bins)[0]
-        self.post_act_hist_counts += torch.histogram(torch.abs(post_activation), bins=self.histogram_bins)[0]
-        # self.post_act_hist_counts += torch.histogram(post_activation, bins=self.histogram_bins)[0]
-        self.t += time.time() - start_time
-        # if self.visit_counts % 30 == 0:
-        # print(f"Time taken to collect stats: {self.t}s.")
+    def collect_stats(self, post_activation):
+        _collect_post_act_histogram(self, post_activation)
 
     def forward(
         self,
@@ -1568,8 +1629,8 @@ class LlamaSparseSiluMLP(LlamaMLP):
                     self.a = dead_percentage
 
                     # Collect histogram stats
-                    if self.is_collect_histogram :  # Padded dataset
-                        self.collect_stats(x, x)
+                    if self.is_collect_histogram:
+                        self.collect_stats(x)
 
                 x[dead_neurons] = 0
 
@@ -1744,13 +1805,8 @@ class Qwen2MoeSparseSiluMLP(Qwen2MoeMLP):
     def deactivate_stats(self):
         self.is_stats = False
 
-    def collect_stats(self, pre_activation, post_activation):
-        start_time = time.time()
-        pre_activation = pre_activation.float().cpu().detach()
-        post_activation = post_activation.float().cpu().detach()
-        self.pre_act_hist_counts += torch.histogram(pre_activation, bins=self.histogram_bins)[0]
-        self.post_act_hist_counts += torch.histogram(torch.abs(post_activation), bins=self.histogram_bins)[0]
-        self.t += time.time() - start_time
+    def collect_stats(self, post_activation):
+        _collect_post_act_histogram(self, post_activation)
 
     def forward(self, x, sp_mask: torch.tensor = None):
         if x.shape[0] == 0:
@@ -1800,8 +1856,8 @@ class Qwen2MoeSparseSiluMLP(Qwen2MoeMLP):
                 )
                 self.visit_counts += 1
 
-                if self.is_collect_histogram and pre_act.eq(0).float().mean() < 0.99:
-                    self.collect_stats(pre_act, post_act)
+                if self.is_collect_histogram:
+                    self.collect_stats(post_act)
 
             post_act[dead_neurons] = 0
 
@@ -1869,7 +1925,7 @@ class SparseQwen2MoeSparseMoeBlock(Qwen2MoeSparseMoeBlock):
             if top_x.shape[0] == 0:
                 continue
 
-            current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
+            current_state = hidden_states.index_select(0, top_x)
             current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
             final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
 
@@ -1978,13 +2034,8 @@ class OlmoeSparseSiluMLP(OlmoeMLP):
     def deactivate_stats(self):
         self.is_stats = False
 
-    def collect_stats(self, pre_activation, post_activation):
-        start_time = time.time()
-        pre_activation = pre_activation.float().cpu().detach()
-        post_activation = post_activation.float().cpu().detach()
-        self.pre_act_hist_counts += torch.histogram(pre_activation, bins=self.histogram_bins)[0]
-        self.post_act_hist_counts += torch.histogram(torch.abs(post_activation), bins=self.histogram_bins)[0]
-        self.t += time.time() - start_time
+    def collect_stats(self, post_activation):
+        _collect_post_act_histogram(self, post_activation)
 
     def forward(self, x, sp_mask: torch.tensor = None):
         if sp_mask is not None:
@@ -2031,8 +2082,8 @@ class OlmoeSparseSiluMLP(OlmoeMLP):
                 )
                 self.visit_counts += 1
 
-                if self.is_collect_histogram and pre_act.eq(0).float().mean() < 0.99:
-                    self.collect_stats(pre_act, post_act)
+                if self.is_collect_histogram:
+                    self.collect_stats(post_act)
 
             post_act[dead_neurons] = 0
 
@@ -2081,7 +2132,7 @@ class SparseOlmoeSparseMoeBlock(OlmoeSparseMoeBlock):
             if top_x.shape[0] == 0:
                 continue
 
-            current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
+            current_state = hidden_states.index_select(0, top_x)
             current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
             final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
 
@@ -2175,13 +2226,8 @@ class DeepseekV2SparseSiluMLP(DeepseekV2MLP):
     def deactivate_stats(self):
         self.is_stats = False
 
-    def collect_stats(self, pre_activation, post_activation):
-        start_time = time.time()
-        pre_activation = pre_activation.float().cpu().detach()
-        post_activation = post_activation.float().cpu().detach()
-        self.pre_act_hist_counts += torch.histogram(pre_activation, bins=self.histogram_bins)[0]
-        self.post_act_hist_counts += torch.histogram(torch.abs(post_activation), bins=self.histogram_bins)[0]
-        self.t += time.time() - start_time
+    def collect_stats(self, post_activation):
+        _collect_post_act_histogram(self, post_activation)
 
     def forward(self, x, sp_mask: torch.tensor = None):
         if x.shape[0] == 0:
@@ -2231,8 +2277,8 @@ class DeepseekV2SparseSiluMLP(DeepseekV2MLP):
                 )
                 self.visit_counts += 1
 
-                if self.is_collect_histogram and pre_act.eq(0).float().mean() < 0.99:
-                    self.collect_stats(pre_act, post_act)
+                if self.is_collect_histogram:
+                    self.collect_stats(post_act)
 
             post_act[dead_neurons] = 0
 
@@ -2302,6 +2348,38 @@ class SparseDeepseekV2MoE(DeepseekV2MoE):
                 *args,
                 **kwargs,
             )
+
+    @torch.no_grad()
+    def moe_infer(self, x, topk_ids, topk_weight):
+        if self.ep_size > 1:
+            return super().moe_infer(x, topk_ids, topk_weight)
+
+        flat_topk_ids = topk_ids.view(-1)
+        sorted_expert_ids, sorted_indices = flat_topk_ids.sort()
+        sorted_tokens = x.index_select(0, sorted_indices // topk_ids.shape[1])
+        outputs = torch.empty_like(sorted_tokens)
+
+        tokens_per_expert = torch.bincount(sorted_expert_ids, minlength=len(self.experts))
+        start_idx = 0
+        for expert_idx, num_tokens_tensor in enumerate(tokens_per_expert):
+            num_tokens = int(num_tokens_tensor.item())
+            if num_tokens == 0:
+                continue
+            end_idx = start_idx + num_tokens
+            expert = self.experts[expert_idx]
+            outputs[start_idx:end_idx] = expert(sorted_tokens[start_idx:end_idx])
+            start_idx = end_idx
+
+        unsorted_outputs = torch.empty_like(outputs)
+        unsorted_outputs.index_copy_(0, sorted_indices, outputs)
+        final_out = (
+            unsorted_outputs.view(*topk_ids.shape, -1)
+            .type(topk_weight.dtype)
+            .mul_(topk_weight.unsqueeze(dim=-1))
+            .sum(dim=1)
+            .type(unsorted_outputs.dtype)
+        )
+        return final_out
 
 
 class SparseDeepseekV2Config(DeepseekV2Config):
@@ -2404,17 +2482,8 @@ class MixtralSparseSiluMLP(MixtralBlockSparseTop2MLP):
     def deactivate_stats(self):
         self.is_stats = False
 
-    def collect_stats(self, pre_activation, post_activation):
-        start_time = time.time()
-        pre_activation = pre_activation.float().cpu().detach()
-        post_activation = post_activation.float().cpu().detach()
-        # self.histogram_bins=self.histogram_bins.to(pre_activation.device).type(pre_activation.dtype)
-        self.pre_act_hist_counts += torch.histogram(pre_activation, bins=self.histogram_bins)[0]
-        self.post_act_hist_counts += torch.histogram(torch.abs(post_activation), bins=self.histogram_bins)[0]
-        # self.post_act_hist_counts += torch.histogram(post_activation, bins=self.histogram_bins)[0]
-        self.t += time.time() - start_time
-        # if self.visit_counts % 30 == 0:
-        #     print(f"Time taken to collect stats: {self.t}s.")
+    def collect_stats(self, post_activation):
+        _collect_post_act_histogram(self, post_activation)
 
     def forward(
         self,
@@ -2540,8 +2609,8 @@ class MixtralSparseSiluMLP(MixtralBlockSparseTop2MLP):
                     self.a = dead_percentage
 
                     # Collect histogram stats
-                    if self.is_collect_histogram :  # Padded dataset
-                        self.collect_stats(pre_act, post_act)
+                    if self.is_collect_histogram:
+                        self.collect_stats(post_act)
 
                 post_act[dead_neurons] = 0
 
@@ -2608,14 +2677,10 @@ class SparseMixtralSparseMoeBlock(MixtralSparseMoeBlock):
 
             # sp_mlp = self.sp_mlps[expert_idx]
 
-            # in torch it is faster to index using lists than torch tensors
-            top_x_list = top_x.tolist()
-            idx_list = idx.tolist()
-
             # Index the correct hidden states and compute the expert hidden state for
             # the current expert. We need to make sure to multiply the output hidden
             # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
-            current_state = hidden_states[None, top_x_list].reshape(-1, hidden_dim)
+            current_state = hidden_states.index_select(0, top_x)
 
             # sp_mask = sp_mlp(current_state)
             # gating_output = expert_layer.sparse_act_fn(expert_layer.w1(current_state))
@@ -2624,7 +2689,7 @@ class SparseMixtralSparseMoeBlock(MixtralSparseMoeBlock):
             # sp_mask = sp_mask > 0  # 二值化掩码
 
 
-            current_hidden_states = expert_layer(current_state)*routing_weights[top_x_list, idx_list, None]
+            current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
 
             # However `index_add_` only support torch tensors for indexing so we'll use
             # the `top_x` tensor here.
