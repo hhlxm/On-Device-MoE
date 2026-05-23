@@ -8,11 +8,13 @@
 #    3) MP + DP combined     — model sharded across M GPUs, N/M processes
 #
 #  Usage:
-#    bash run_sparsity_parallel_examples.sh <model_type> <mp|dp|mp_dp> [GPUS] [extra args...] [--gate]
+#    bash run_sparsity_parallel_examples.sh <model_type> <mp|dp|mp_dp> [GPUS] [extra args...] [--gate] [--baseline-only]
 #
 #  --gate is optional and can appear anywhere. When enabled, eval_sparsity.py
 #  imports modeling_xxx_moe_sparsity_pipeline_gate instead of the standard
 #  modeling_xxx_moe_sparsity_pipeline modules.
+#  --baseline-only is optional and can appear anywhere. When enabled, only the
+#  non-sparse baseline is evaluated.
 #  LIMIT is optional. For mp/dp, the 4th positional argument is LIMIT.
 #  For mp_dp, the 4th positional argument is GPUS_PER_MODEL and the 5th is LIMIT.
 #  You can also set LIMIT via environment variable.
@@ -25,17 +27,22 @@
 #    bash run_sparsity_parallel_examples.sh deepseek mp_dp "0,1,2,3,4,5,6,7"
 #    bash run_sparsity_parallel_examples.sh deepseek mp_dp "0,1,2,3,4,5,6,7" 2 100
 #    bash run_sparsity_parallel_examples.sh qwen     dp   "7" 2 0.3 --gate
+#    bash run_sparsity_parallel_examples.sh deepseek mp   "4,5,6,7" --baseline-only
 # ==========================================================================
 
 set -euo pipefail
 
 # ---------------------- Parse arguments ----------------------
 USE_GATE=0
+BASELINE_ONLY=0
 POSITIONAL_ARGS=()
 for arg in "$@"; do
     case "${arg}" in
         --gate)
             USE_GATE=1
+            ;;
+        --baseline-only)
+            BASELINE_ONLY=1
             ;;
         *)
             POSITIONAL_ARGS+=("${arg}")
@@ -292,7 +299,13 @@ run_experiment() {
     esac
 }
 
-if [[ -z "${SPARSITY_RATIOS}" ]]; then
+if (( BASELINE_ONLY )); then
+    echo ""
+    echo "Running baseline only (no sparsity) ..."
+    MODE="none"
+    SPARSITY_RATIO=0.0
+    run_experiment
+elif [[ -z "${SPARSITY_RATIOS}" ]]; then
     # No sparsity specified — run baseline + full sweep
     echo ""
     echo "[1/2] Running baseline (no sparsity) ..."
