@@ -45,8 +45,14 @@ fi
 WORK_DIR="/home/fit/renjuliuji/WORK/lxm/On-Device-MoE"
 CONDA_ENV="lxm_eval"
 PARTITION="h01"
-NUM_GPU=2
 JOB_NAME="sparsity_${MODEL_TYPE}_${PARALLEL_MODE}"
+
+IFS=',' read -ra GPU_ARRAY <<< "${GPU_IDS}"
+NUM_GPU=${#GPU_ARRAY[@]}
+if (( NUM_GPU < 1 )); then
+    echo "GPU IDs must not be empty."
+    exit 1
+fi
 
 GPUS_PER_MODEL="${GPUS_PER_MODEL:-2}"
 
